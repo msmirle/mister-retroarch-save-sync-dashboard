@@ -73,7 +73,8 @@ those same options. Do **not** start a second copy of `save-sync`: the included
 full Compose example retains your original container name and would conflict
 with the existing stack.
 
-Open **http://YOUR_SERVER_LAN_IP:8080**.
+Open **http://YOUR_SERVER_LAN_IP:8080**. The dashboard container is named
+`mister-retroarch-save-sync-dashboard`.
 
 ### Alternatively: download the full stack example
 
@@ -109,12 +110,12 @@ Do not overwrite an existing customized Compose file with this download.
   require a copy in every possible core/alias folder for a game to be paired.
 
 **No authentication is included. This is LAN-only software.** The default port
-mapping listens on all host interfaces. Restrict it with your firewall and/or set
-`DASHBOARD_BIND_ADDRESS` to the server's LAN address. Docker-published ports can
+mapping, `8080:8080`, listens on all host interfaces. Restrict it with your firewall
+and/or add the server's LAN address to the port mapping. Docker-published ports can
 bypass some host firewall rules, so verify your Docker firewall policy. Do not
-forward port 8080 from the internet. Use `127.0.0.1` with an authenticated reverse
-proxy if external access is needed. Change the published port with
-`DASHBOARD_PORT`.
+forward port 8080 from the internet. Use `127.0.0.1:8080:8080` with an authenticated
+reverse proxy if external access is needed. Change the published port by editing
+the left-hand port in Compose (for example, `8089:8080`).
 
 ## Updates without forking upstream
 
@@ -188,7 +189,7 @@ you see a transient mismatch.
 | `RETROARCH_CORES` | `Mesen,Snes9x,Genesis Plus GX` | Core directories to inspect |
 | `SYSTEMS` | `nes,snes,genesis` | Subset of the three supported platforms |
 | `REFRESH_SECONDS` | `60` | Scan interval (5-86400 seconds) |
-| `PORT` | `8080` | Container HTTP port; prefer changing `DASHBOARD_PORT` in Compose |
+| `PORT` | `8080` | Container HTTP port; prefer changing the published host port in Compose |
 | `HOST` | `0.0.0.0` | Container listen address |
 | `MAPPING_FILE` | unset | Optional custom JSON mapping, mounted read-only; invalid files fail startup |
 | `SYNC_MODULE_ROOT` | `/app/src` | Upstream module directory; useful for local development |

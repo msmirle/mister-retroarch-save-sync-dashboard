@@ -12,6 +12,7 @@ services:
 
   dashboard:
     image: ghcr.io/msmirle/mister-retroarch-save-sync-dashboard:latest
+    container_name: mister-retroarch-save-sync-dashboard
     restart: unless-stopped
     user: "${DASHBOARD_UID:-1000}:${DASHBOARD_GID:-1000}"
     environment:
@@ -20,7 +21,7 @@ services:
       REFRESH_SECONDS: "60"
       TZ: ${TZ:-UTC}
     ports:
-      - "${DASHBOARD_BIND_ADDRESS:-0.0.0.0}:${DASHBOARD_PORT:-8080}:8080"
+      - "8080:8080"
     read_only: true
     cap_drop:
       - ALL
