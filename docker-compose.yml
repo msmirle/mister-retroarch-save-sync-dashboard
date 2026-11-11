@@ -11,10 +11,7 @@ services:
       - /mnt/external-8tb/mister/saves:/mister/saves
 
   dashboard:
-    build:
-      context: .
-      target: runtime
-    image: mister-retroarch-save-sync-dashboard:local
+    image: ghcr.io/msmirle/mister-retroarch-save-sync-dashboard:latest
     restart: unless-stopped
     user: "${DASHBOARD_UID:-1000}:${DASHBOARD_GID:-1000}"
     environment:

@@ -30,26 +30,26 @@ scripts, fonts, analytics, or services receiving save contents.
 
 ## Deploy on your Linux Docker server
 
-This is a **private** GitHub repository. Authenticate Git on the server first
-(for example with `gh auth login` and `gh auth setup-git`, or a read-only SSH
-deploy key). Never put credentials into Compose or a clone URL.
+Use the public prebuilt image:
 
-```sh
-git clone https://github.com/msmirle/mister-retroarch-save-sync-dashboard.git
-cd mister-retroarch-save-sync-dashboard
+```text
+ghcr.io/msmirle/mister-retroarch-save-sync-dashboard:latest
 ```
+
+Images support **AMD64 and ARM64**. No GitHub login, source checkout, or local
+build is needed on the server.
 
 ### Add to the existing stack (recommended)
 
 Leave your existing `save-sync` service and deployment in place. Copy **only the
 `dashboard` service** from [docker-compose.yml](docker-compose.yml) into the
-remotely deployed Compose file. Change its build context from `.` to the absolute
-Linux path of this checkout. For example, if you cloned under `/opt`:
+remotely deployed Compose file.
+
+If upgrading from the previous build-based deployment, remove its entire
+`build:` section and replace the dashboard's `image:` line with:
 
 ```yaml
-    build:
-      context: /opt/mister-retroarch-save-sync-dashboard
-      target: runtime
+    image: ghcr.io/msmirle/mister-retroarch-save-sync-dashboard:latest
 ```
 
 Keep the dashboard mount paths from the example if they match your server:
@@ -63,7 +63,7 @@ Both source directories must already exist. The dashboard will not create them.
 In your existing stack directory, run:
 
 ```sh
-docker compose build --pull dashboard
+docker compose pull dashboard
 docker compose up -d --no-deps dashboard
 docker compose logs dashboard
 ```
@@ -75,12 +75,23 @@ with the existing stack.
 
 Open **http://YOUR_SERVER_LAN_IP:8080**.
 
-### Alternatively: manage the full stack from this checkout
+### Alternatively: download the full stack example
 
 The included [docker-compose.yml](docker-compose.yml) contains the original sync
 service with the same image, cores, and read/write save mounts, plus the dashboard.
 Use it only after deliberately migrating your existing stack management to this
-directory/project. Back up saves before changing the synchronizer deployment.
+file/project, or for a new deployment. Back up saves before changing the
+synchronizer deployment.
+
+Download it into a new deployment directory without cloning the repository:
+
+```sh
+curl -fL https://raw.githubusercontent.com/msmirle/mister-retroarch-save-sync-dashboard/main/docker-compose.yml -o docker-compose.yml
+docker compose pull
+docker compose up -d
+```
+
+Do not overwrite an existing customized Compose file with this download.
 
 ## Read-only protection and access
 
@@ -111,24 +122,37 @@ Your sync service continues using the official upstream `:latest` image.
 The dashboard image derives from that same image but overrides its command;
 the **sync daemon never starts in the dashboard container**.
 
-Update this checkout, then run these commands from your existing stack directory:
+From your existing stack directory, run:
 
 ```sh
-# In the dashboard checkout:
-git pull --ff-only
-
-# In the existing Compose stack directory:
-docker compose pull save-sync
-docker compose build --pull dashboard
+docker compose pull
 docker compose up -d
 ```
 
-An existing dashboard image does not change just because the sync image was
-updated: **rebuild with `--pull`** to refresh its converters and mapping.
-CI tests and builds against upstream `:latest` on pushes and daily, to detect
-upstream interface changes. It does not deploy to your server or publish images.
-You can pin a tested upstream image digest with the Docker build argument
-`SYNC_IMAGE` if you prefer controlled updates.
+GitHub Actions tests against upstream `:latest`, then publishes a fresh dashboard
+image on successful main-branch pushes, daily builds, and manual workflow runs.
+Publishing uses the same upstream image digest that passed the tests. Failed
+tests leave the previously published dashboard image in place. The workflow
+does **not** automatically update containers on your server.
+
+No source checkout, `git pull`, or `docker compose build` is needed to update.
+For dashboard-only updates, use `docker compose pull dashboard` followed by
+`docker compose up -d --no-deps dashboard`.
+
+Each published build also has a unique `build-<run-id>-<attempt>` tag. Pin that
+tag, or an image digest, instead of `:latest` for controlled updates/rollback.
+
+### One-time container package setup (maintainer)
+
+GitHub creates container packages as **private**, even for public repositories.
+After the first successful image publication, open the
+[container package](https://github.com/users/msmirle/packages/container/package/mister-retroarch-save-sync-dashboard),
+choose **Package settings**, then **Change visibility** to **Public**.
+This only needs to be done once; subsequent images retain the package visibility.
+
+The workflow's anonymous-pull check intentionally fails until the package is
+public. After changing visibility, rerun the failed job. Both architectures must
+be downloadable without credentials.
 
 ## Pairing details
 
@@ -177,6 +201,13 @@ per-platform issues and game errors in the dashboard for save health.
 
 ## Development and validation
 
+Source checkout is only needed for development:
+
+```sh
+git clone https://github.com/msmirle/mister-retroarch-save-sync-dashboard.git
+cd mister-retroarch-save-sync-dashboard
+```
+
 No runtime npm packages are needed. Node.js 20+ and a built upstream checkout
 are sufficient for local development. Set `SYNC_MODULE_ROOT` to that checkout's
 `src` directory, then run:
@@ -197,10 +228,21 @@ Tests create synthetic saves in temporary directories, verify file contents
 and timestamps remain unchanged, and cover CRC32, conversion, missing saves,
 duplicate names, unreadable files, refresh behavior, and HTTP restrictions.
 CI also verifies the hardened container can read saves but cannot write them.
+Image publication only runs for this repository's public main branch, never for
+pull requests.
 
 ## License
 
 GPL-3.0-or-later. See [LICENSE](LICENSE). Conversion code remains in the
-upstream image, including its original license files. If distributing images
-outside your private deployment, provide the complete corresponding source
-and license materials required by the GPL, including the exact upstream version.
+upstream image, including its original license files at `/app/LICENSE` and
+`/app/LICENSE.save-file-converter`.
+
+Corresponding source for a published image is available from this repository
+at the commit in its `org.opencontainers.image.revision` label, and from the
+exact upstream source URL in its `org.opencontainers.image.base.source` label.
+That upstream source includes the vendored save-file-converter code. Inspect
+these labels with:
+
+```sh
+docker image inspect ghcr.io/msmirle/mister-retroarch-save-sync-dashboard:latest --format '{{json .Config.Labels}}'
+```
