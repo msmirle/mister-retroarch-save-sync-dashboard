@@ -1,0 +1,44 @@
+services:
+  save-sync:
+    image: ghcr.io/juaniwck/mister-retroarch-save-sync:latest
+    container_name: mister-retroarch-save-sync
+    restart: unless-stopped
+    environment:
+      RETROARCH_CORES: "Mesen, Snes9x, Genesis Plus GX"
+      TZ: ${TZ:-UTC}
+    volumes:
+      - /mnt/external-8tb/retroarch:/retroarch
+      - /mnt/external-8tb/mister/saves:/mister/saves
+
+  dashboard:
+    build:
+      context: .
+      target: runtime
+    image: mister-retroarch-save-sync-dashboard:local
+    restart: unless-stopped
+    user: "${DASHBOARD_UID:-1000}:${DASHBOARD_GID:-1000}"
+    environment:
+      RETROARCH_CORES: "Mesen, Snes9x, Genesis Plus GX"
+      SYSTEMS: "nes,snes,genesis"
+      REFRESH_SECONDS: "60"
+      TZ: ${TZ:-UTC}
+    ports:
+      - "${DASHBOARD_BIND_ADDRESS:-0.0.0.0}:${DASHBOARD_PORT:-8080}:8080"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - type: bind
+        source: /mnt/external-8tb/retroarch/saves
+        target: /retroarch/saves
+        read_only: true
+        bind:
+          create_host_path: false
+      - type: bind
+        source: /mnt/external-8tb/mister/saves
+        target: /mister/saves
+        read_only: true
+        bind:
+          create_host_path: false

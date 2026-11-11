@@ -1,0 +1,16 @@
+SPDX-License-Identifier: GPL-3.0-or-later
+
+This project is licensed under the GNU General Public License, version 3
+or (at your option) any later version.
+
+The full license terms are available at:
+https://www.gnu.org/licenses/gpl-3.0.html
+
+The Docker image derives from juaniwck/mister-retroarch-save-sync and uses
+its conversion modules, which include save-file-converter by Euan Forrester.
+The upstream image retains its own source modules and full license texts
+at /app/LICENSE and /app/LICENSE.save-file-converter.
+
+Upstream source:
+https://github.com/juaniwck/mister-retroarch-save-sync
+https://github.com/euan-forrester/save-file-converter

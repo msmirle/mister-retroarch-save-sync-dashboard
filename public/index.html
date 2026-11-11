@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>MiSTer / RetroArch Save Dashboard</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <p class="eyebrow">MISTER / RETROARCH <span class="readonly">READ ONLY</span></p>
+        <h1>Save dashboard</h1>
+        <p class="intro">Check your saves. Never change them.</p>
+      </div>
+      <button id="refresh" type="button">Refresh now</button>
+    </header>
+    <div id="connection-error" class="notice error" role="alert" hidden></div>
+    <p id="scan-info" class="scan-info" role="status">Loading the first scan...</p>
+    <section id="summary" class="summary" aria-label="All-platform game totals"></section>
+    <nav id="platforms" aria-label="Platform filter"></nav>
+    <section class="filters" aria-label="Save filters">
+      <label class="search">Find a game or path<input id="search" type="search" placeholder="Search saves..." autocomplete="off"></label>
+      <label>Status
+        <select id="status">
+          <option value="all">All statuses</option>
+          <option value="attention">Needs attention</option>
+          <option value="matching">All matching saves</option>
+          <option value="identical">Contents match</option>
+          <option value="equivalent">Contents match (format differs)</option>
+          <option value="different">Different contents</option>
+          <option value="missing">Missing counterpart</option>
+          <option value="error">Read / format error</option>
+          <option value="ambiguous">Ambiguous names</option>
+        </select>
+      </label>
+    </section>
+    <div id="results" aria-live="polite"></div>
+    <footer>
+      Matches are determined by comparing actual save-data bytes, not CRC values.
+      Upstream conversion handles Genesis layout; NES and Genesis padding is accounted for.
+      SNES saves must match exactly. Raw CRC32 values are available under file diagnostics.
+      Files are paired by game filename (ignoring extension and case), separately within each platform.
+      This dashboard does not repair or synchronize saves.
+    </footer>
+  </main>
+</body>
+</html>

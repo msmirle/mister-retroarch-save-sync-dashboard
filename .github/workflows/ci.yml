@@ -1,0 +1,58 @@
+name: Dashboard checks
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 9 * * *"
+
+permissions:
+  contents: read
+
+jobs:
+  test-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Compose configuration
+        run: docker compose config --quiet
+      - name: Test against current upstream converters
+        run: docker build --pull --target test -t save-dashboard:test .
+      - name: Build runtime image
+        run: docker build --target runtime -t save-dashboard:check .
+      - name: Check hardened runtime and read-only mounts
+        shell: bash
+        run: |
+          set -euo pipefail
+          saves="$(mktemp -d)"
+          mkdir -p "$saves/retroarch/Mesen" "$saves/retroarch/Snes9x" "$saves/retroarch/Genesis Plus GX"
+          mkdir -p "$saves/mister/NES" "$saves/mister/SNES" "$saves/mister/Genesis" "$saves/mister/MegaDrive"
+          printf 'dashboard smoke test' > "$saves/retroarch/Mesen/Example.srm"
+          cp "$saves/retroarch/Mesen/Example.srm" "$saves/mister/NES/Example.sav"
+          chmod -R a+rX "$saves"
+          docker run -d --name dashboard-check --read-only --cap-drop ALL \
+            --security-opt no-new-privileges:true \
+            --mount "type=bind,source=$saves/retroarch,target=/retroarch/saves,readonly" \
+            --mount "type=bind,source=$saves/mister,target=/mister/saves,readonly" \
+            save-dashboard:check
+          trap 'docker logs dashboard-check; docker rm -f dashboard-check' EXIT
+          for attempt in {1..30}; do
+            if docker exec dashboard-check node -e "fetch('http://127.0.0.1:8080/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"; then
+              break
+            fi
+            sleep 1
+          done
+          docker exec dashboard-check node -e "
+            const fs = require('node:fs');
+            (async () => {
+              const response = await fetch('http://127.0.0.1:8080/api/status');
+              const state = await response.json();
+              if (!response.ok || state.snapshot.summary.identical !== 1) throw Error('Comparison smoke test failed');
+              for (const root of ['/retroarch/saves', '/mister/saves']) {
+                try { fs.writeFileSync(root + '/must-not-write', 'test'); }
+                catch (error) { if (error.code === 'EROFS' || error.code === 'EACCES') continue; throw error; }
+                throw Error('Save mount is writable: ' + root);
+              }
+            })().catch(error => { console.error(error); process.exit(1); });
+          "
