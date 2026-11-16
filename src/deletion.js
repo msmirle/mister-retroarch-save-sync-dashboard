@@ -2,6 +2,7 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { createHash } = require('node:crypto');
 const { collect } = require('./scanner');
 
 class DeletionError extends Error {
@@ -25,12 +26,23 @@ async function inspectTarget(root, file) {
     if (stat.isSymbolicLink() || !(last ? stat.isFile() : stat.isDirectory())) {
       throw new DeletionError(409, 'Save paths must be regular files and directories, without symlinks.');
     }
-    versions.push(last
-      ? `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}:${stat.ctimeNs}`
-      : `${stat.dev}:${stat.ino}`);
+    versions.push(last ? `${stat.dev}:${stat.ino}:${stat.size}:${stat.mtimeNs}` : `${stat.dev}:${stat.ino}`);
     if (!last) current = path.join(current, parts[index]);
   }
   await fs.access(path.dirname(absolutePath), fs.constants.W_OK);
+  const handle = await fs.open(absolutePath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+  try {
+    const before = await handle.stat({ bigint: true });
+    const hash = createHash('sha256');
+    for await (const chunk of handle.createReadStream({ autoClose: false })) hash.update(chunk);
+    const after = await handle.stat({ bigint: true });
+    const currentStat = await fs.lstat(absolutePath, { bigint: true });
+    if (before.size !== after.size || before.mtimeNs !== after.mtimeNs || currentStat.isSymbolicLink()
+      || before.ino !== currentStat.ino || before.dev !== currentStat.dev) {
+      throw new DeletionError(409, 'Save changed while preparing deletion. Refresh and review a new confirmation.');
+    }
+    versions.push(hash.digest('hex'));
+  } finally { await handle.close(); }
   return {
     side: file.side,
     path: file.path,

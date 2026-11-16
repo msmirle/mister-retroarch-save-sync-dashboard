@@ -25,7 +25,8 @@ it does not replace or modify the upstream synchronizer.
   filtering, and status filtering. Browsers poll the latest snapshot every five
   seconds without initiating additional scans.
 
-The dashboard cannot upload, download, repair, or synchronize saves. By default,
+The dashboard cannot upload, download, or repair saves and does not implement its own
+synchronizer. Optional sync controls manage the existing upstream container. By default,
 its only enabled POST endpoint triggers a read-only scan. Save deletion requires
 explicit server configuration and writable save mounts (see below). There are no external
 scripts, fonts, analytics, or services receiving save contents.
@@ -124,6 +125,89 @@ to your server or save files.
 Online visits always request the latest dashboard files. After an update, close
 all dashboard tabs/app windows and reopen to activate the new offline shell.
 
+## Optional: sync status, on/off controls, and automatic pause
+
+The upstream sync image stays unchanged. An optional private helper in this
+repository controls **only the configured sync container**. The page shows its
+current **On / Off / Unavailable** state, refreshed with the dashboard's five-second
+poll, and a switch to turn it on or off. **On means the container is running**,
+not that every save is matching or that a transfer is currently in progress.
+
+The helper stops the sync container before deleting saves, waits until Docker
+confirms it is off, and then removes the files. It restarts sync only after
+successful verification and only if it was previously on. A manually switched-off
+service stays off. Partial deletion, failed verification, or an uncertain outcome
+leaves sync off for review. A failed preflight that removed nothing restores the
+previous on state. Restart errors are explicitly reported.
+
+This uses **stop/start**, not Docker freeze/unfreeze: resuming a frozen process
+could finish an old write and recreate a deleted save. Other devices can still
+write saves independently; close the game before deleting.
+
+### Setup for your existing `compose.yaml` and `.env`
+
+Keep your current Compose file, including its Traefik labels, networks, and save
+mounts. Download this **additional** file beside it:
+
+```sh
+curl -fL https://raw.githubusercontent.com/msmirle/mister-retroarch-save-sync-dashboard/main/compose.sync-control.yaml -o compose.sync-control.yaml
+```
+
+Generate a private token:
+
+```sh
+openssl rand -hex 32
+```
+
+Add these two entries to your existing `.env`, pasting the generated value after
+`SYNC_CONTROL_TOKEN=`:
+
+```dotenv
+COMPOSE_FILE=compose.yaml:compose.sync-control.yaml
+SYNC_CONTROL_TOKEN=
+```
+
+The `COMPOSE_FILE` separator above is for your **Linux Docker server**. If your
+base file is named `docker-compose.yml`, use
+`COMPOSE_FILE=docker-compose.yml:compose.sync-control.yaml` instead.
+Keep your existing deletion settings:
+
+```dotenv
+ALLOW_SAVE_DELETE=true
+DASHBOARD_SAVES_READ_ONLY=false
+```
+
+The extra file wires the helper into the dashboard; no additional edits to your
+existing Compose file are needed for sync control. Your base file still needs
+the deletion environment/mount references described in the next section.
+Then run from the same directory:
+
+```sh
+docker compose config --quiet
+docker compose pull dashboard sync-control
+docker compose up -d sync-control dashboard
+```
+
+These commands add the helper and recreate the dashboard, leaving `save-sync`
+running. Once installed, the dashboard manages that existing container when
+you use the switch or delete a game. Its default name is
+`mister-retroarch-save-sync`; set `SYNC_CONTAINER_NAME` in `.env` only if you renamed it.
+
+**Permissions:** only the helper receives `/var/run/docker.sock`. It has no
+published port and only joins a private internal network shared with the
+dashboard. Requests require the token, which is not sent to the browser. The
+dashboard stays unprivileged and does not receive Docker socket access.
+However, **Docker socket access is effectively host-administrator access**;
+a read-only socket mount does not make Docker API actions read-only. Enable the
+helper only on a trusted host and protect the dashboard with authentication.
+Do not expose the helper through Traefik or publish its port.
+
+If a configured helper is unavailable, the page shows that error and deletion
+is blocked rather than proceeding without a pause. Without the optional helper,
+existing deployments retain the original concurrent-delete behavior.
+If the dashboard crashes during an automatic pause, sync may remain off; check
+the indicator and explicitly turn it back on after reviewing the saves.
+
 ## Optional: delete a game's saves from both sides
 
 Deletion is **disabled by default**. To enable it with the included Compose
@@ -147,7 +231,8 @@ docker compose pull dashboard
 docker compose up -d --no-deps dashboard
 ```
 
-Its UID/GID must have write and traversal permission on the save directories.
+Its UID/GID must have read permission on the save files and write and traversal
+permission on the save directories.
 Back up saves first. Anyone who can access a deletion-enabled dashboard can delete
 saves; protect it with an authenticated reverse proxy and do not expose its port publicly.
 
@@ -158,7 +243,9 @@ Other platforms are untouched. Review the exact list, type the game name, and ch
 **Delete all listed saves**. This permanently deletes the files; there is no undo.
 Canceling the confirmation does not change saves.
 
-All removals are submitted concurrently, without requiring you to stop save-sync.
+All removals are submitted concurrently. With the optional sync-control helper,
+the dashboard stops and restores the sync service as described above.
+Without that helper, deletion does not stop save-sync.
 **This is not an atomic filesystem transaction.** The upstream synchronizer ignores
 already-deleted source files, but a sync operation or game already writing a save
 can recreate copies. Close the game before deleting. If you need a guaranteed
@@ -166,7 +253,8 @@ quiet window, stop save-sync before deletion and start it again afterward.
 Only configured copies are removed; copies in unconfigured cores or on another
 device can also be synced back later.
 
-Before removing anything, the server rechecks the full file list and file identities.
+Before removing anything, the server rechecks the full file list, file identities,
+and SHA-256 content fingerprints.
 A changed list, modified file, inaccessible directory, or symlink blocks the operation.
 Missing optional alias directories are allowed. A follow-up scan refreshes the dashboard.
 If a removal fails or files are seen again, the dashboard reports the problem rather
@@ -275,6 +363,10 @@ you see a transient mismatch.
 | `REFRESH_SECONDS` | `60` | Scan interval (5-86400 seconds) |
 | `ALLOW_SAVE_DELETE` | `false` | Enable confirmed deletion of all configured copies of a game; requires writable save mounts |
 | `DASHBOARD_SAVES_READ_ONLY` | `true` | Compose-only flag controlling both save mounts; set `false` only when enabling deletion |
+| `SYNC_CONTROL_URL` | unset | Optional private helper origin; wired automatically by `compose.sync-control.yaml` |
+| `SYNC_CONTROL_TOKEN` | unset | Shared 64-hex-character secret for the dashboard and helper; keep in `.env` |
+| `SYNC_CONTAINER_NAME` | `mister-retroarch-save-sync` | Helper-only name of the existing sync container to control |
+| `DOCKER_SOCKET_PATH` | `/var/run/docker.sock` | Helper-only Docker socket path |
 | `PORT` | `8080` | Container HTTP port; prefer changing the published host port in Compose |
 | `HOST` | `0.0.0.0` | Container listen address |
 | `MAPPING_FILE` | unset | Optional custom JSON mapping, mounted read-only; invalid files fail startup |
@@ -288,6 +380,9 @@ name and returns a five-minute, single-use confirmation token and exact file lis
 `POST /api/delete` takes that token and the exact game name as `confirm`, revalidates
 the list, and removes all copies concurrently. Both endpoints require same-origin
 JSON requests; client-supplied filesystem paths are never used as deletion targets.
+`GET /api/status` also reports sync service state, control errors, and busy state.
+With a configured helper, same-origin `POST /api/sync` accepts a boolean `enabled`
+to stop/start the existing service. Controls and deletions cannot overlap.
 `GET /healthz` checks service readiness, not whether all games match; inspect
 per-platform issues and game errors in the dashboard for save health.
 
@@ -324,7 +419,9 @@ docker build --pull --target test .
 Tests create synthetic saves in temporary directories, verify scans leave file contents
 and timestamps unchanged, and cover CRC32, conversion, missing saves,
 duplicate names, unreadable files, refresh behavior, HTTP restrictions, PWA assets,
-static-only offline caching, and confirmed deletion using temporary synthetic saves.
+static-only offline caching, confirmed deletion using temporary synthetic saves,
+and sync coordination. Helper tests use an isolated fake Docker API socket and
+never stop or start a real container.
 CI also verifies the hardened container can read saves but cannot write them.
 Image publication only runs for this repository's public main branch, never for
 pull requests.

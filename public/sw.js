@@ -2,7 +2,7 @@
 
 // Bump the version when changing app-shell files so installed apps refresh their offline copy.
 const CACHE_PREFIX = 'save-dashboard-shell-';
-const CACHE_NAME = `${CACHE_PREFIX}v2`;
+const CACHE_NAME = `${CACHE_PREFIX}v3`;
 const APP_SHELL = [
   '/',
   '/app.js',

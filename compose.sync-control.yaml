@@ -1,0 +1,49 @@
+services:
+  dashboard:
+    environment:
+      SYNC_CONTROL_URL: http://sync-control:8090
+      SYNC_CONTROL_TOKEN: "${SYNC_CONTROL_TOKEN:?Set SYNC_CONTROL_TOKEN in .env to a random 64-character hexadecimal value}"
+    networks:
+      - default
+      - sync-control
+    depends_on:
+      sync-control:
+        condition: service_started
+
+  sync-control:
+    image: ghcr.io/msmirle/mister-retroarch-save-sync-dashboard:latest
+    container_name: mister-retroarch-save-sync-control
+    command: ["node", "src/sync-control.js"]
+    user: "0:0"
+    restart: unless-stopped
+    environment:
+      HOST: 0.0.0.0
+      PORT: "8090"
+      SYNC_CONTAINER_NAME: "${SYNC_CONTAINER_NAME:-mister-retroarch-save-sync}"
+      SYNC_CONTROL_TOKEN: "${SYNC_CONTROL_TOKEN:?Set SYNC_CONTROL_TOKEN in .env to a random 64-character hexadecimal value}"
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    volumes:
+      - type: bind
+        source: /var/run/docker.sock
+        target: /var/run/docker.sock
+        read_only: true
+        bind:
+          create_host_path: false
+    networks:
+      - sync-control
+    labels:
+      traefik.enable: "false"
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/healthz').then(r=>process.exit(r.ok?0:1)).catch(e=>{console.error(e.message);process.exit(1)})"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+
+networks:
+  sync-control:
+    internal: true

@@ -7,6 +7,7 @@ const { randomUUID } = require('node:crypto');
 const { loadConfig } = require('./config');
 const { scan } = require('./scanner');
 const { DeletionError, planDeletion, deletePlanned, listedFiles } = require('./deletion');
+const { SyncControlError, createSyncClient } = require('./sync-control');
 
 const ASSETS = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
@@ -25,7 +26,10 @@ const HEADERS = {
   'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
 };
 
-async function createDashboard(config, { scanSaves = scan, deleteSaves = deletePlanned, logger = console } = {}) {
+async function createDashboard(config, {
+  scanSaves = scan, deleteSaves = deletePlanned, logger = console,
+  syncClient = config.syncControl ? createSyncClient(config.syncControl) : null,
+} = {}) {
   const assets = new Map(await Promise.all([...ASSETS].map(async ([route, [name, contentType]]) => [
     route, { body: await fs.readFile(path.join(__dirname, '..', 'public', name)), contentType },
   ])));
@@ -34,10 +38,16 @@ async function createDashboard(config, { scanSaves = scan, deleteSaves = deleteP
   let scanError = null;
   let lastFailureAt = null;
   let activeDeletion = null;
+  let activeSyncChange = null;
+  let syncRevision = 0;
+  let syncStatus = { configured: Boolean(syncClient), state: syncClient ? 'unknown' : 'not-configured', error: null, checkedAt: null };
   const deletionPlans = new Map();
 
   function refresh() {
     if (activeDeletion) return activeDeletion;
+    return runScan();
+  }
+  function runScan() {
     if (!activeScan) {
       activeScan = Promise.resolve().then(() => scanSaves(config)).then((result) => {
         snapshot = result;
@@ -56,21 +66,82 @@ async function createDashboard(config, { scanSaves = scan, deleteSaves = deleteP
       snapshot, scanning: activeScan !== null, scanError, lastFailureAt,
       deletionEnabled: config.allowSaveDelete === true,
       deleting: activeDeletion !== null,
+      sync: { ...syncStatus, busy: activeSyncChange !== null || activeDeletion !== null },
     };
+  }
+  async function syncCall(operation) {
+    const revision = ++syncRevision;
+    try {
+      const current = await operation();
+      if (revision === syncRevision) {
+        syncStatus = { ...current, configured: true, error: null, checkedAt: new Date().toISOString() };
+      }
+      return current;
+    } catch (error) {
+      if (revision === syncRevision) {
+        syncStatus = { configured: true, state: 'unavailable', error: error.message, checkedAt: new Date().toISOString() };
+      }
+      throw error;
+    }
+  }
+  async function updateSyncStatus() {
+    if (!syncClient) return;
+    try { await syncCall(() => syncClient.status()); }
+    catch (error) { logger.error('Cannot read sync service status:', error); }
+  }
+  function remainingGame(plan) {
+    return snapshot?.platforms.find((entry) => entry.id === plan.platform)?.games
+      .find((game) => game.name.toLowerCase() === plan.name.toLowerCase());
+  }
+  async function coordinatedDeletion(plan) {
+    let restart = null;
+    if (syncClient) {
+      const before = await syncCall(() => syncClient.status());
+      if (!['on', 'off'].includes(before.state)) {
+        throw new SyncControlError(409, 'Sync must be on or fully off before deletion. Resolve its current state first; no files were deleted.');
+      }
+      if (before.state === 'on') {
+        await syncCall(() => syncClient.setEnabled(false, before.id));
+        restart = before.id;
+      }
+    }
+    let result;
+    try {
+      result = await deleteSaves(config, plan);
+    } catch (error) {
+      if (restart && error instanceof DeletionError) {
+        try { await syncCall(() => syncClient.setEnabled(true, restart)); }
+        catch (resumeError) {
+          throw new SyncControlError(502, `${error.message} Sync restart could not be verified: ${resumeError.message}`);
+        }
+      } else if (restart) {
+        throw new SyncControlError(502, `${error.message} Sync was left off because the deletion outcome is uncertain.`);
+      }
+      throw error;
+    }
+    if (restart) {
+      await runScan();
+      if (result.failed.length || scanError || remainingGame(plan)) {
+        result.syncWarning = 'Sync was left off because deletion was incomplete or could not be verified. Review the files before turning it on.';
+      } else {
+        try { await syncCall(() => syncClient.setEnabled(true, restart)); }
+        catch (error) { result.syncWarning = `Saves were removed, but sync restart could not be verified: ${error.message}`; }
+      }
+    }
+    return result;
   }
   function json(response, status, value, head = false) {
     response.writeHead(status, { ...HEADERS, 'Content-Type': 'application/json; charset=utf-8' });
     response.end(head ? undefined : JSON.stringify(value));
   }
-  async function deletionRequest(request) {
-    if (config.allowSaveDelete !== true) throw new DeletionError(403, 'Save deletion is disabled on this server.');
+  async function controlRequest(request) {
     const origin = request.headers.origin;
     if (![`http://${request.headers.host}`, `https://${request.headers.host}`].includes(origin)
       || (request.headers['sec-fetch-site'] && !['same-origin', 'none'].includes(request.headers['sec-fetch-site']))) {
-      throw new DeletionError(403, 'Same-origin requests are required for save deletion.');
+      throw new DeletionError(403, 'Same-origin requests are required for dashboard controls.');
     }
     if (!/^application\/json(?:\s*;|$)/i.test(request.headers['content-type'] || '')) {
-      throw new DeletionError(415, 'Save deletion requires application/json.');
+      throw new DeletionError(415, 'Dashboard controls require application/json.');
     }
     let size = 0;
     const chunks = [];
@@ -78,13 +149,13 @@ async function createDashboard(config, { scanSaves = scan, deleteSaves = deleteP
       size += chunk.length;
       if (size <= 8192) chunks.push(chunk);
     }
-    if (size > 8192) throw new DeletionError(413, 'Deletion request is too large.');
+    if (size > 8192) throw new DeletionError(413, 'Control request is too large.');
     let body;
     try {
       body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
     } catch (error) {
       if (!(error instanceof SyntaxError)) throw error;
-      throw new DeletionError(400, 'Invalid JSON deletion request.');
+      throw new DeletionError(400, 'Invalid JSON control request.');
     }
     if (!body || typeof body !== 'object' || Array.isArray(body)) {
       throw new DeletionError(400, 'A JSON object is required.');
@@ -95,9 +166,24 @@ async function createDashboard(config, { scanSaves = scan, deleteSaves = deleteP
     const head = request.method === 'HEAD';
     const route = request.url.split('?')[0];
     try {
-      if (request.method === 'POST' && (route === '/api/delete/preview' || route === '/api/delete')) {
-        const body = await deletionRequest(request);
+      if (request.method === 'POST' && route === '/api/sync') {
+        if (!syncClient) throw new SyncControlError(403, 'Sync control is not configured on this server.');
+        const body = await controlRequest(request);
+        if (typeof body.enabled !== 'boolean') throw new SyncControlError(400, 'enabled must be true or false.');
+        if (activeDeletion || activeSyncChange) throw new SyncControlError(409, 'Sync control is busy. Wait for the current operation.');
+        activeSyncChange = (async () => {
+          const before = await syncCall(() => syncClient.status());
+          if (before.state === 'missing') throw new SyncControlError(409, 'The configured sync container was not found.');
+          await syncCall(() => syncClient.setEnabled(body.enabled, before.id));
+        })();
+        try { await activeSyncChange; }
+        finally { activeSyncChange = null; await updateSyncStatus(); }
+        json(response, syncStatus.state === 'unavailable' ? 502 : 200, state());
+      } else if (request.method === 'POST' && (route === '/api/delete/preview' || route === '/api/delete')) {
+        if (config.allowSaveDelete !== true) throw new DeletionError(403, 'Save deletion is disabled on this server.');
+        const body = await controlRequest(request);
         if (activeDeletion) throw new DeletionError(409, 'Another deletion is in progress. Refresh before retrying.');
+        if (activeSyncChange) throw new SyncControlError(409, 'Sync control is busy. Wait before deleting saves.');
         for (const [token, plan] of deletionPlans) {
           if (plan.expiresAt <= Date.now()) deletionPlans.delete(token);
         }
@@ -117,7 +203,7 @@ async function createDashboard(config, { scanSaves = scan, deleteSaves = deleteP
           deletionPlans.delete(body.token);
           activeDeletion = (async () => {
             if (activeScan) await activeScan;
-            return deleteSaves(config, plan);
+            return coordinatedDeletion(plan);
           })();
           let result;
           try {
@@ -125,13 +211,14 @@ async function createDashboard(config, { scanSaves = scan, deleteSaves = deleteP
           } finally {
             activeDeletion = null;
             await refresh();
+            await updateSyncStatus();
           }
-          const remaining = snapshot?.platforms.find((entry) => entry.id === plan.platform)?.games
-            .find((game) => game.name.toLowerCase() === plan.name.toLowerCase());
+          const remaining = remainingGame(plan);
           let error = null;
           if (result.failed.length) error = 'Some save files could not be deleted. Review the per-file errors before retrying.';
           else if (scanError) error = 'Files were removed, but the follow-up scan failed. Their current absence could not be verified.';
           else if (remaining) error = 'Save files still exist or were recreated by another writer. Refresh and review before retrying.';
+          if (result.syncWarning) error = [error, result.syncWarning].filter(Boolean).join(' ');
           if (error) logger.error('Save deletion incomplete:', { error, ...result });
           json(response, error ? 409 : 200, { ...state(), ...result, error });
         }
@@ -144,11 +231,13 @@ async function createDashboard(config, { scanSaves = scan, deleteSaves = deleteP
         }
         request.resume();
         await refresh();
+        await updateSyncStatus();
         json(response, scanError ? 503 : 200, state());
       } else if (request.method !== 'GET' && !head) {
-        response.setHeader('Allow', ['/api/refresh', '/api/delete', '/api/delete/preview'].includes(route) ? 'POST' : 'GET, HEAD');
+        response.setHeader('Allow', ['/api/refresh', '/api/delete', '/api/delete/preview', '/api/sync'].includes(route) ? 'POST' : 'GET, HEAD');
         json(response, 405, { error: 'Method not allowed' });
       } else if (route === '/api/status') {
+        await updateSyncStatus();
         json(response, snapshot ? 200 : 503, state(), head);
       } else if (route === '/healthz') {
         json(response, snapshot && !scanError ? 200 : 503, {
@@ -167,8 +256,9 @@ async function createDashboard(config, { scanSaves = scan, deleteSaves = deleteP
       logger.error('Dashboard request failed:', error);
       request.resume();
       if (!response.headersSent) {
-        json(response, error instanceof DeletionError ? error.status : 500, {
-          error: error instanceof DeletionError ? error.message : 'Dashboard request failed; check server logs',
+        const expected = error instanceof DeletionError || error instanceof SyncControlError;
+        json(response, expected ? error.status : 500, {
+          error: expected ? error.message : 'Dashboard request failed; check server logs',
         });
       }
       else response.destroy();
@@ -177,6 +267,7 @@ async function createDashboard(config, { scanSaves = scan, deleteSaves = deleteP
   server.requestTimeout = 30_000;
   server.headersTimeout = 10_000;
   await refresh();
+  await updateSyncStatus();
   const interval = setInterval(() => { if (!activeDeletion) refresh(); }, config.refreshSeconds * 1000);
   interval.unref();
   server.on('close', () => clearInterval(interval));

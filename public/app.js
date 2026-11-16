@@ -14,6 +14,8 @@ let selectedPlatform = 'all';
 let refreshing = false;
 let deletionBusy = false;
 let pendingDeletion = null;
+let syncBusy = false;
+let syncState = { configured: false, state: 'unknown', busy: false };
 const $ = (id) => document.getElementById(id);
 
 function element(tag, text, className) {
@@ -27,9 +29,57 @@ function timestamp(value) {
   return value ? new Date(value).toLocaleString() : 'unknown';
 }
 
-function updateDeleteControls() {
+function updateControls() {
   for (const button of document.querySelectorAll('.delete-save')) {
-    button.disabled = refreshing || deletionBusy || latest?.deleting || !$('connection-error').hidden;
+    button.disabled = refreshing || deletionBusy || syncBusy || latest?.deleting || syncState.busy
+      || (syncState.configured && !['on', 'off'].includes(syncState.state)) || !$('connection-error').hidden;
+  }
+  $('sync-toggle').disabled = refreshing || deletionBusy || syncBusy || syncState.busy
+    || !['on', 'off', 'paused'].includes(syncState.state) || !$('connection-error').hidden;
+}
+
+function renderSync(sync) {
+  syncState = sync;
+  const labels = {
+    on: 'On', off: 'Off', paused: 'Paused externally', restarting: 'Restarting',
+    missing: 'Container not found', unavailable: 'Unavailable', unknown: 'Checking...',
+    'not-configured': 'Not connected',
+  };
+  $('sync-status').textContent = `Sync service: ${labels[sync.state] || 'Unknown'}`;
+  $('sync-status').dataset.state = sync.state;
+  $('sync-detail').textContent = !sync.configured
+    ? 'Connect the optional sync-control helper to enable status and on/off controls.'
+    : sync.busy ? 'A sync control or save deletion operation is in progress.'
+      : 'Controls the existing sync container. Automatically pauses it during save deletion.';
+  $('sync-toggle').hidden = !sync.configured;
+  $('sync-toggle').textContent = sync.state === 'on' ? 'Turn sync off' : 'Turn sync on';
+  $('sync-toggle').setAttribute('aria-checked', String(sync.state === 'on'));
+  $('sync-error').textContent = sync.error || '';
+  $('sync-error').hidden = !sync.error;
+  updateControls();
+}
+
+async function toggleSync() {
+  syncBusy = true;
+  $('sync-action-error').hidden = true;
+  updateControls();
+  try {
+    const response = await fetch('/api/sync', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled: syncState.state !== 'on' }),
+      cache: 'no-store',
+    });
+    const data = await response.json();
+    if (data.sync) renderSync(data.sync);
+    if (!response.ok) throw new Error(data.error || data.sync?.error || `Server returned HTTP ${response.status}`);
+  } catch (error) {
+    $('sync-action-error').textContent = `The sync change could not be verified: ${error.message}`;
+    $('sync-action-error').hidden = false;
+  } finally {
+    syncBusy = false;
+    await load();
+    updateControls();
   }
 }
 
@@ -42,7 +92,7 @@ function deletionNotice(message, error = false) {
 
 async function previewDeletion(platform, game) {
   deletionBusy = true;
-  updateDeleteControls();
+  updateControls();
   try {
     const response = await fetch('/api/delete/preview', {
       method: 'POST',
@@ -59,12 +109,18 @@ async function previewDeletion(platform, game) {
     $('delete-confirm-label').textContent = `Type "${data.game}" to confirm`;
     $('delete-confirm').value = '';
     $('delete-submit').disabled = true;
+    $('delete-warning').textContent = syncState.configured
+      ? 'Permanently delete every listed file. This cannot be undone. Close the game first. '
+        + 'The sync service is stopped before deletion and restarted after success only if it was previously on. '
+        + 'Other devices can still recreate saves.'
+      : 'Permanently delete every listed file. This cannot be undone. Close the game first. '
+        + 'Removals are submitted together, but an active game or sync job can recreate files.';
     $('delete-dialog').showModal();
   } catch (error) {
     deletionNotice(`Cannot prepare deletion: ${error.message}`, true);
   } finally {
     deletionBusy = false;
-    updateDeleteControls();
+    updateControls();
   }
 }
 
@@ -77,8 +133,12 @@ async function confirmDeletion(event) {
   const { token, game } = pendingDeletion;
   $('delete-dialog').close();
   deletionBusy = true;
-  updateDeleteControls();
-  deletionNotice('Deleting all listed save copies...');
+  updateControls();
+  deletionNotice(syncState.configured ? 'Pausing sync and deleting all listed save copies...' : 'Deleting all listed save copies...');
+  if (syncState.configured) {
+    $('sync-status').textContent = 'Sync service: coordinating deletion...';
+    $('sync-detail').textContent = 'Waiting for deletion and verification before restoring the previous sync state.';
+  }
   try {
     const response = await fetch('/api/delete', {
       method: 'POST',
@@ -87,6 +147,7 @@ async function confirmDeletion(event) {
       cache: 'no-store',
     });
     const data = await response.json();
+    if (data.sync) renderSync(data.sync);
     if (data.snapshot) {
       latest = data;
       render();
@@ -101,7 +162,7 @@ async function confirmDeletion(event) {
   } finally {
     deletionBusy = false;
     await load();
-    updateDeleteControls();
+    updateControls();
   }
 }
 
@@ -213,21 +274,22 @@ function render() {
     }
     results.append(section);
   }
-  updateDeleteControls();
+  updateControls();
 }
 
 async function load(manual = false) {
-  if (refreshing || deletionBusy) return;
+  if (refreshing || deletionBusy || syncBusy) return;
   refreshing = true;
   $('refresh').disabled = true;
   $('refresh').textContent = manual ? 'Scanning...' : 'Refresh now';
-  updateDeleteControls();
+  updateControls();
   try {
     const response = await fetch(manual ? '/api/refresh' : '/api/status', {
       method: manual ? 'POST' : 'GET',
       cache: 'no-store',
     });
     const data = await response.json();
+    if (data.sync) renderSync(data.sync);
     if (data.snapshot) {
       const changed = latest?.snapshot?.completedAt !== data.snapshot.completedAt
         || latest?.scanning !== data.scanning || latest?.deletionEnabled !== data.deletionEnabled
@@ -241,15 +303,17 @@ async function load(manual = false) {
     $('connection-error').textContent = `Unable to verify current saves: ${error.message}. `
       + (latest ? 'Showing the last completed scan, which may be stale.' : 'No scan is available.');
     $('connection-error').hidden = false;
+    renderSync({ ...syncState, state: 'unavailable', error: 'Cannot verify sync status while the dashboard connection is unavailable.' });
   } finally {
     refreshing = false;
     $('refresh').disabled = false;
     $('refresh').textContent = 'Refresh now';
-    updateDeleteControls();
+    updateControls();
   }
 }
 
 $('delete-form').addEventListener('submit', confirmDeletion);
+$('sync-toggle').addEventListener('click', toggleSync);
 $('delete-confirm').addEventListener('input', () => {
   $('delete-submit').disabled = !pendingDeletion || $('delete-confirm').value !== pendingDeletion.game;
 });

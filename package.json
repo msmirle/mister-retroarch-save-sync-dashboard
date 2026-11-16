@@ -10,6 +10,6 @@
   "scripts": {
     "start": "node src/server.js",
     "test": "node --test",
-    "check": "node --check src/config.js && node --check src/scanner.js && node --check src/deletion.js && node --check src/server.js && node --check public/app.js && node --check public/sw.js"
+    "check": "node --check src/config.js && node --check src/scanner.js && node --check src/deletion.js && node --check src/sync-control.js && node --check src/server.js && node --check public/app.js && node --check public/sw.js"
   }
 }

@@ -25,6 +25,15 @@
       </div>
       <button id="refresh" type="button">Refresh now</button>
     </header>
+    <section class="sync-panel" aria-label="Automatic save sync">
+      <div>
+        <strong id="sync-status" role="status">Sync service: checking...</strong>
+        <p id="sync-detail" class="muted">Checking the existing save-sync service.</p>
+      </div>
+      <button id="sync-toggle" type="button" role="switch" aria-label="Automatic save sync" aria-checked="false" disabled hidden>Turn sync on</button>
+    </section>
+    <div id="sync-error" class="notice error" role="alert" hidden></div>
+    <div id="sync-action-error" class="notice error" role="alert" hidden></div>
     <div id="install-error" class="notice error" role="status" hidden></div>
     <div id="connection-error" class="notice error" role="alert" hidden></div>
     <div id="delete-result" class="notice" role="status" hidden></div>

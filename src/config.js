@@ -2,6 +2,7 @@
 
 const fs = require('node:fs/promises');
 const path = require('node:path');
+const { loadSyncControlConfig } = require('./sync-control');
 
 const PLATFORMS = {
   nes: 'NES',
@@ -28,6 +29,7 @@ function safeDirectory(value) {
 }
 
 async function loadConfig(env = process.env) {
+  const syncControl = loadSyncControlConfig(env);
   if (env.ALLOW_SAVE_DELETE !== undefined && !['true', 'false'].includes(env.ALLOW_SAVE_DELETE)) {
     throw new Error('ALLOW_SAVE_DELETE must be true or false');
   }
@@ -76,6 +78,7 @@ async function loadConfig(env = process.env) {
     port: integer(env.PORT, 8080, 0, 65535, 'PORT'),
     refreshSeconds: integer(env.REFRESH_SECONDS, 60, 5, 86400, 'REFRESH_SECONDS'),
     allowSaveDelete: env.ALLOW_SAVE_DELETE === 'true',
+    syncControl,
     retroarchRoot: path.resolve(env.RETROARCH_ROOT || '/retroarch', 'saves'),
     misterRoot: path.resolve(env.MISTER_SAVES || '/mister/saves'),
     platforms,

@@ -10,6 +10,7 @@ const { loadConfig } = require('../src/config');
 const { crc32, scan } = require('../src/scanner');
 const { createDashboard } = require('../src/server');
 const { deletePlanned } = require('../src/deletion');
+const { SyncControlError } = require('../src/sync-control');
 
 async function fixture(t, options = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'save-dashboard-'));
@@ -410,6 +411,27 @@ test('deletion starts all removals together, rejects overlapping deletes, and re
   assert.equal(await fs.readFile(mi, 'utf8'), 'save');
 });
 
+test('deletion distinguishes metadata-only changes from changed contents with the same size and timestamp', async (t) => {
+  for (const changedContents of [false, true]) {
+    await t.test(changedContents ? 'changed contents' : 'metadata only', async (t) => {
+      const f = await fixture(t, { ALLOW_SAVE_DELETE: 'true' });
+      const ra = await f.write('retroarch', 'Mesen/Game.srm', Buffer.from('save'));
+      await f.write('mister', 'NES/Game.sav', Buffer.from('save'));
+      const timestamp = new Date('2026-01-01T00:00:00Z');
+      await fs.utimes(ra, timestamp, timestamp);
+      const dashboard = await createDashboard(f.config, { logger: { error() {} } });
+      const url = await listen(t, dashboard);
+      const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
+      if (changedContents) await fs.writeFile(ra, 'SAVE');
+      await fs.utimes(ra, new Date(), timestamp);
+      assert.equal((await fs.stat(ra)).mtimeMs, timestamp.getTime());
+      const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+      assert.equal(response.status, changedContents ? 409 : 200);
+      if (changedContents) assert.equal(await fs.readFile(ra, 'utf8'), 'SAVE');
+    });
+  }
+});
+
 test('deletion validates origin, JSON, tokens, and game/platform identifiers without accepting arbitrary paths', async (t) => {
   const f = await fixture(t, { ALLOW_SAVE_DELETE: 'true' });
   await f.write('retroarch', 'Mesen/Game.srm', Buffer.from('keep'));
@@ -486,6 +508,179 @@ test('deletion refuses symlink/junction parent replacements without touching oth
   assert.equal(response.status, 409);
   assert.equal(await fs.readFile(mi, 'utf8'), 'save');
   assert.equal(await fs.readFile(outside, 'utf8'), 'outside');
+});
+
+function syncFixture(initial = 'on') {
+  const state = { state: initial, id: 'a'.repeat(64), container: 'test-sync' };
+  const commands = [];
+  return {
+    state, commands,
+    client: {
+      async status() { return { ...state }; },
+      async setEnabled(enabled) {
+        commands.push(enabled ? 'on' : 'off');
+        state.state = enabled ? 'on' : 'off';
+        return { ...state };
+      },
+    },
+  };
+}
+
+test('automatic sync pause stops before deletion, verifies while off, and preserves a manually-off service', async (t) => {
+  for (const initial of ['on', 'off']) {
+    await t.test(initial, async (t) => {
+      const f = await fixture(t, { ALLOW_SAVE_DELETE: 'true' });
+      await f.write('retroarch', 'Mesen/Game.srm', Buffer.from('save'));
+      await f.write('mister', 'NES/Game.sav', Buffer.from('save'));
+      const sync = syncFixture(initial);
+      let removed = false;
+      let verifiedOff = false;
+      const dashboard = await createDashboard(f.config, {
+        syncClient: sync.client,
+        async deleteSaves(config, plan) {
+          assert.equal(sync.state.state, 'off');
+          const result = await deletePlanned(config, plan);
+          removed = true;
+          return result;
+        },
+        async scanSaves(config) {
+          if (removed && sync.state.state === 'off') verifiedOff = true;
+          return scan(config);
+        },
+      });
+      const url = await listen(t, dashboard);
+      const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
+      assert.equal(sync.state.state, initial, 'opening a confirmation must not stop sync');
+      const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+      assert.equal(response.status, 200);
+      const data = await response.json();
+      assert.equal(data.sync.state, initial);
+      assert.equal(data.sync.busy, false);
+      assert.deepEqual(sync.commands, initial === 'on' ? ['off', 'on'] : []);
+      assert.equal(verifiedOff, true);
+    });
+  }
+});
+
+test('automatic sync pause fails closed when status or stopping cannot be verified', async (t) => {
+  for (const failure of ['status', 'stop']) {
+    await t.test(failure, async (t) => {
+      const f = await fixture(t, { ALLOW_SAVE_DELETE: 'true' });
+      await f.write('retroarch', 'Mesen/Game.srm', Buffer.from('keep'));
+      await f.write('mister', 'NES/Game.sav', Buffer.from('keep'));
+      const sync = syncFixture();
+      if (failure === 'status') sync.client.status = async () => { throw new SyncControlError(502, 'test helper unavailable'); };
+      else sync.client.setEnabled = async () => { throw new SyncControlError(502, 'test stop failed'); };
+      const dashboard = await createDashboard(f.config, { syncClient: sync.client, logger: { error() {} } });
+      const url = await listen(t, dashboard);
+      const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
+      const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+      assert.equal(response.status, 502);
+      assert.match((await response.json()).error, /test/);
+      await f.unchanged();
+    });
+  }
+});
+
+test('automatic sync pause restores a rejected preflight but leaves sync off after incomplete deletion or failed verification', async (t) => {
+  for (const failure of ['changed file', 'partial removal', 'scan', 'restart']) {
+    await t.test(failure, async (t) => {
+      const f = await fixture(t, { ALLOW_SAVE_DELETE: 'true' });
+      const ra = await f.write('retroarch', 'Mesen/Game.srm', Buffer.from('save'));
+      const mi = await f.write('mister', 'NES/Game.sav', Buffer.from('save'));
+      const sync = syncFixture();
+      let removed = false;
+      const setEnabled = sync.client.setEnabled;
+      sync.client.setEnabled = async (enabled) => {
+        if (enabled && failure === 'restart') throw new SyncControlError(502, 'test restart failed');
+        return setEnabled(enabled);
+      };
+      const dashboard = await createDashboard(f.config, {
+        syncClient: sync.client, logger: { error() {} },
+        async deleteSaves(config, plan) {
+          const result = await deletePlanned(config, plan, {
+            async unlink(target) {
+              if (failure === 'partial removal' && target === mi) throw new Error('test removal denied');
+              await fs.unlink(target);
+            },
+          });
+          removed = true;
+          return result;
+        },
+        async scanSaves(config) {
+          if (removed && failure === 'scan') throw new Error('test verification failed');
+          return scan(config);
+        },
+      });
+      const url = await listen(t, dashboard);
+      const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
+      if (failure === 'changed file') await fs.writeFile(ra, 'changed before confirmation');
+      const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+      assert.equal(response.status, 409);
+      const data = await response.json();
+      if (failure === 'changed file') {
+        assert.equal(sync.state.state, 'on');
+        assert.match(data.error, /changed/);
+        assert.equal(await fs.readFile(mi, 'utf8'), 'save');
+      } else {
+        assert.equal(data.sync.state, 'off');
+        assert.match(data.error, /left off|restart/);
+        assert.deepEqual(sync.commands, ['off']);
+      }
+    });
+  }
+});
+
+test('sync status and manual toggles are independent of scans and require same-origin JSON controls', async (t) => {
+  const sync = syncFixture();
+  const dashboard = await createDashboard({ refreshSeconds: 60 }, {
+    syncClient: sync.client, scanSaves: async () => ({ platforms: [] }), logger: { error() {} },
+  });
+  const url = await listen(t, dashboard);
+  assert.equal((await (await fetch(`${url}/api/status`)).json()).sync.state, 'on');
+  assert.equal((await deletionPost(url, '/api/sync', { enabled: false }, { Origin: 'https://other.invalid' })).status, 403);
+  assert.equal((await deletionPost(url, '/api/sync', { enabled: 'false' })).status, 400);
+  assert.deepEqual(sync.commands, []);
+  const off = await deletionPost(url, '/api/sync', { enabled: false });
+  assert.equal(off.status, 200);
+  assert.equal((await off.json()).sync.state, 'off');
+  const on = await deletionPost(url, '/api/sync', { enabled: true });
+  assert.equal(on.status, 200);
+  assert.equal((await on.json()).sync.state, 'on');
+  sync.client.status = async () => { throw new SyncControlError(502, 'test helper unavailable'); };
+  const unavailable = await fetch(`${url}/api/status`);
+  assert.equal(unavailable.status, 200);
+  assert.equal((await unavailable.json()).sync.state, 'unavailable');
+});
+
+test('manual sync toggles cannot race an automatic deletion pause', async (t) => {
+  const f = await fixture(t, { ALLOW_SAVE_DELETE: 'true' });
+  await f.write('retroarch', 'Mesen/Game.srm', Buffer.from('save'));
+  await f.write('mister', 'NES/Game.sav', Buffer.from('save'));
+  const sync = syncFixture();
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let deleting;
+  const started = new Promise((resolve) => { deleting = resolve; });
+  const dashboard = await createDashboard(f.config, {
+    syncClient: sync.client, logger: { error() {} },
+    async deleteSaves(config, plan) {
+      deleting();
+      await gate;
+      return deletePlanned(config, plan);
+    },
+  });
+  const url = await listen(t, dashboard);
+  const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
+  const removal = deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+  try {
+    await started;
+    assert.equal(sync.state.state, 'off');
+    assert.equal((await deletionPost(url, '/api/sync', { enabled: true })).status, 409);
+    assert.deepEqual(sync.commands, ['off']);
+  } finally { release(); }
+  assert.equal((await removal).status, 200);
+  assert.deepEqual(sync.commands, ['off', 'on']);
 });
 
 test('PWA metadata, service worker, and correctly sized phone icons are served', async (t) => {
@@ -583,7 +778,7 @@ test('PWA offline fallback is static-only, network-first, and cleans up only its
   assert.equal(await (await request('/app.js')).text(), 'cached /app.js');
   cached.delete('/style.css');
   await assert.rejects(request('/style.css'), disconnected);
-  for (const route of ['/api/status', '/api/refresh', '/api/delete/preview', '/api/delete', '/healthz', '/unknown', '/sw.js', 'https://other.test/app.js']) {
+  for (const route of ['/api/status', '/api/refresh', '/api/delete/preview', '/api/delete', '/api/sync', '/healthz', '/unknown', '/sw.js', 'https://other.test/app.js']) {
     assert.equal(request(route), undefined, `${route} must remain network-only`);
   }
   assert.equal(request('/api/refresh', 'POST'), undefined);

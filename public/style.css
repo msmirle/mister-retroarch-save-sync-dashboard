@@ -23,6 +23,11 @@ button:hover { background: #253e5f; }
 button:disabled { opacity: .6; cursor: wait; }
 button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid #87bfff; outline-offset: 3px; }
 #refresh { background: #275b96; border-color: #4888ce; white-space: nowrap; }
+.sync-panel { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin: 20px 0; padding: 16px; background: #142034; border: 1px solid var(--border); border-radius: 10px; }
+.sync-panel p { margin: 4px 0 0; font-size: .8rem; }
+#sync-status[data-state="on"] { color: #80dfb1; }
+#sync-status[data-state="off"], #sync-status[data-state="paused"] { color: #ffd18b; }
+#sync-status[data-state="unavailable"], #sync-status[data-state="missing"] { color: #ffb1b8; }
 .summary { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 12px; }
 .stat { background: #142034; border: 1px solid var(--border); border-top: 3px solid currentColor; border-radius: 10px; padding: 16px; }
 .stat strong { display: block; font-size: 2rem; }
