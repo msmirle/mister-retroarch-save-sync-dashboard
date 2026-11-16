@@ -4,6 +4,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
 const os = require('node:os');
 const path = require('node:path');
+const vm = require('node:vm');
 const { test } = require('node:test');
 const { loadConfig } = require('../src/config');
 const { crc32, scan } = require('../src/scanner');
@@ -261,6 +262,108 @@ test('HTTP refresh rescans, restricts methods/origins/paths, and never modifies 
   assert.equal((await fetch(`${url}/%2e%2e%2fpackage.json`)).status, 404);
   assert.equal((await fetch(`${url}/api/status`, { method: 'HEAD' })).status, 200);
   await f.unchanged();
+});
+
+test('PWA metadata, service worker, and correctly sized phone icons are served', async (t) => {
+  const dashboard = await createDashboard({ refreshSeconds: 60 }, { scanSaves: async () => ({}) });
+  const url = await listen(t, dashboard);
+  const page = await fetch(url);
+  const html = await page.text();
+  assert.match(html, /rel="manifest" href="\/manifest.webmanifest"/);
+  assert.match(html, /rel="apple-touch-icon".*href="\/icons\/apple-touch-icon.png"/);
+  assert.match(page.headers.get('content-security-policy'), /worker-src 'self'/);
+  const response = await fetch(`${url}/manifest.webmanifest`);
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get('content-type'), /application\/manifest\+json/);
+  const manifest = await response.json();
+  assert.ok(manifest.name && manifest.short_name);
+  assert.equal(manifest.display, 'standalone');
+  assert.equal(manifest.start_url, '/');
+  assert.equal(manifest.scope, '/');
+  assert.ok(manifest.icons.some((icon) => icon.sizes === '192x192'));
+  assert.ok(manifest.icons.some((icon) => icon.sizes === '512x512'));
+  for (const icon of [...manifest.icons, { src: '/icons/apple-touch-icon.png', sizes: '180x180' }]) {
+    const image = await fetch(`${url}${icon.src}`);
+    assert.equal(image.status, 200);
+    assert.equal(image.headers.get('content-type'), 'image/png');
+    const bytes = Buffer.from(await image.arrayBuffer());
+    assert.equal(bytes.subarray(0, 8).toString('hex'), '89504e470d0a1a0a');
+    assert.equal(`${bytes.readUInt32BE(16)}x${bytes.readUInt32BE(20)}`, icon.sizes);
+  }
+  const worker = await fetch(`${url}/sw.js`);
+  assert.equal(worker.status, 200);
+  assert.match(worker.headers.get('content-type'), /text\/javascript/);
+  assert.equal(worker.headers.get('cache-control'), 'no-store');
+  const head = await fetch(`${url}/sw.js`, { method: 'HEAD' });
+  assert.equal(head.status, 200);
+  assert.equal(await head.text(), '');
+});
+
+test('PWA offline fallback is static-only, network-first, and cleans up only its own old caches', async () => {
+  const handlers = new Map();
+  const cached = new Map();
+  const deleted = [];
+  let currentCache;
+  let claimed = false;
+  let online = true;
+  let status = 200;
+  const disconnected = new Error('Offline');
+  const cache = {
+    async addAll(routes) {
+      for (const route of routes) cached.set(route, new Response(`cached ${route}`));
+    },
+    async match(route) { return cached.get(route)?.clone(); },
+  };
+  vm.runInNewContext(await fs.readFile(path.join(__dirname, '..', 'public', 'sw.js'), 'utf8'), {
+    URL,
+    self: {
+      location: { origin: 'https://dashboard.test' },
+      clients: { async claim() { claimed = true; } },
+      addEventListener(name, handler) { handlers.set(name, handler); },
+    },
+    caches: {
+      async open(name) { currentCache = name; return cache; },
+      async keys() { return [currentCache, 'save-dashboard-shell-old', 'unrelated-app']; },
+      async delete(name) { deleted.push(name); return true; },
+    },
+    async fetch() {
+      if (!online) throw disconnected;
+      return new Response('network response', { status });
+    },
+  });
+  async function lifecycle(name) {
+    let done;
+    handlers.get(name)({ waitUntil(promise) { done = promise; } });
+    await done;
+  }
+  function request(route, method = 'GET') {
+    let response;
+    handlers.get('fetch')({
+      request: { url: new URL(route, 'https://dashboard.test').href, method },
+      respondWith(promise) { response = promise; },
+    });
+    return response;
+  }
+  await lifecycle('install');
+  assert.ok(cached.has('/') && cached.has('/app.js') && cached.has('/style.css'));
+  assert.ok([...cached.keys()].every((route) => route === '/' || /^\/(?:app\.js|style\.css|manifest\.webmanifest|icons\/[^/]+\.png)$/.test(route)));
+  await lifecycle('activate');
+  assert.deepEqual(deleted, ['save-dashboard-shell-old']);
+  assert.equal(claimed, true);
+
+  assert.equal(await (await request('/')).text(), 'network response');
+  status = 503;
+  assert.equal((await request('/')).status, 503, 'HTTP errors must not be hidden by cached success');
+  online = false;
+  assert.equal(await (await request('/?from=home-screen')).text(), 'cached /');
+  assert.equal(await (await request('/app.js')).text(), 'cached /app.js');
+  cached.delete('/style.css');
+  await assert.rejects(request('/style.css'), disconnected);
+  for (const route of ['/api/status', '/api/refresh', '/healthz', '/unknown', '/sw.js', 'https://other.test/app.js']) {
+    assert.equal(request(route), undefined, `${route} must remain network-only`);
+  }
+  assert.equal(request('/api/refresh', 'POST'), undefined);
+  assert.equal(request('/', 'POST'), undefined);
 });
 
 test('concurrent refreshes share a scan and failures retain a visibly stale snapshot', async (t) => {

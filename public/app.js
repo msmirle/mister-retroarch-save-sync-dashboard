@@ -161,3 +161,14 @@ $('search').addEventListener('input', render);
 $('status').addEventListener('change', render);
 load();
 setInterval(() => load(), 5000);
+
+if ('serviceWorker' in navigator && window.isSecureContext) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }).catch((error) => {
+      console.error('App installation support failed:', error);
+      $('install-error').textContent = 'App installation and offline support could not start. '
+        + 'The dashboard still works online. Reload to retry.';
+      $('install-error').hidden = false;
+    });
+  });
+}

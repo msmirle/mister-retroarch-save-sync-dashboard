@@ -4,8 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark">
+  <meta name="theme-color" content="#0c1421">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-title" content="Save Dashboard">
   <title>MiSTer / RetroArch Save Dashboard</title>
-  <link rel="icon" href="data:,">
+  <link rel="manifest" href="/manifest.webmanifest">
+  <link rel="icon" type="image/png" sizes="192x192" href="/icons/icon-192.png">
+  <link rel="apple-touch-icon" sizes="180x180" href="/icons/apple-touch-icon.png">
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
 </head>
@@ -19,6 +25,7 @@
       </div>
       <button id="refresh" type="button">Refresh now</button>
     </header>
+    <div id="install-error" class="notice error" role="status" hidden></div>
     <div id="connection-error" class="notice error" role="alert" hidden></div>
     <p id="scan-info" class="scan-info" role="status">Loading the first scan...</p>
     <section id="summary" class="summary" aria-label="All-platform game totals"></section>

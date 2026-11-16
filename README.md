@@ -94,6 +94,34 @@ docker compose up -d
 
 Do not overwrite an existing customized Compose file with this download.
 
+## Install on your phone
+
+The dashboard is a Progressive Web App (PWA). After deploying this version, open
+your HTTPS dashboard address in your phone's browser, for example
+`https://mistersavesync.serverbessie.localdomain/`:
+
+- **Android (Chrome / Edge):** use the browser menu's **Install app** or
+  **Add to Home screen** option.
+- **iPhone / iPad (Safari):** tap **Share**, then **Add to Home Screen**. Leave
+  **Open as Web App** enabled if that option is shown, then tap **Add**.
+
+The installed app opens in its own window with a home-screen icon. No additional
+server configuration is needed behind an HTTPS reverse proxy serving the
+dashboard at `/`. The phone must resolve the hostname and trust the HTTPS
+certificate; a certificate warning bypass is not sufficient for service workers.
+For a private CA, install and trust its root certificate on the phone.
+Plain HTTP on a LAN IP still works as a dashboard, but does not support the PWA
+service worker.
+
+After one successful online visit, the app shell can open offline. **Save scans
+are never cached**: the server must be reachable for current results. A connection
+error explicitly identifies unavailable results or a last scan already visible
+in the open app that may now be stale. Installation does not grant offline access
+to your server or save files.
+
+Online visits always request the latest dashboard files. After an update, close
+all dashboard tabs/app windows and reopen to activate the new offline shell.
+
 ## Read-only protection and access
 
 - Both dashboard save mounts use Docker `read_only: true`.
@@ -219,6 +247,11 @@ npm test
 npm start
 ```
 
+When changing app-shell files, bump the cache version in [public/sw.js](public/sw.js)
+so installed apps replace their offline shell. Only explicitly listed static
+assets belong in that cache; API responses and health checks must remain network-only.
+Service workers can also be tested on `http://localhost:8080` during development.
+
 For a complete Linux test with the real upstream image:
 
 ```sh
@@ -227,7 +260,8 @@ docker build --pull --target test .
 
 Tests create synthetic saves in temporary directories, verify file contents
 and timestamps remain unchanged, and cover CRC32, conversion, missing saves,
-duplicate names, unreadable files, refresh behavior, and HTTP restrictions.
+duplicate names, unreadable files, refresh behavior, HTTP restrictions, PWA assets,
+and static-only offline caching.
 CI also verifies the hardened container can read saves but cannot write them.
 Image publication only runs for this repository's public main branch, never for
 pull requests.

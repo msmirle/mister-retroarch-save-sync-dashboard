@@ -10,12 +10,17 @@ const ASSETS = new Map([
   ['/', ['index.html', 'text/html; charset=utf-8']],
   ['/app.js', ['app.js', 'text/javascript; charset=utf-8']],
   ['/style.css', ['style.css', 'text/css; charset=utf-8']],
+  ['/manifest.webmanifest', ['manifest.webmanifest', 'application/manifest+json; charset=utf-8']],
+  ['/sw.js', ['sw.js', 'text/javascript; charset=utf-8']],
+  ['/icons/icon-192.png', ['icons/icon-192.png', 'image/png']],
+  ['/icons/icon-512.png', ['icons/icon-512.png', 'image/png']],
+  ['/icons/apple-touch-icon.png', ['icons/apple-touch-icon.png', 'image/png']],
 ]);
 const HEADERS = {
   'Cache-Control': 'no-store',
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
-  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
+  'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; manifest-src 'self'; worker-src 'self'; object-src 'none'; base-uri 'none'; frame-ancestors 'none'",
 };
 
 async function createDashboard(config, { scanSaves = scan, logger = console } = {}) {
