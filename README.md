@@ -1,6 +1,7 @@
 # MiSTer / RetroArch Save Dashboard
 
-A read-only, **save-content comparison** dashboard for **NES, SNES, and Genesis / Mega Drive** saves.
+A **save-content comparison** dashboard for **NES, SNES, and Genesis / Mega Drive** saves.
+Read-only by default, with optional confirmed deletion of a game's copies on both sides.
 It supplements [mister-retroarch-save-sync](https://github.com/juaniwck/mister-retroarch-save-sync);
 it does not replace or modify the upstream synchronizer.
 
@@ -24,8 +25,9 @@ it does not replace or modify the upstream synchronizer.
   filtering, and status filtering. Browsers poll the latest snapshot every five
   seconds without initiating additional scans.
 
-The dashboard cannot upload, download, repair, rename, delete, or synchronize
-saves. Its only POST endpoint triggers a read-only scan. There are no external
+The dashboard cannot upload, download, repair, or synchronize saves. By default,
+its only enabled POST endpoint triggers a read-only scan. Save deletion requires
+explicit server configuration and writable save mounts (see below). There are no external
 scripts, fonts, analytics, or services receiving save contents.
 
 ## Deploy on your Linux Docker server
@@ -122,14 +124,68 @@ to your server or save files.
 Online visits always request the latest dashboard files. After an update, close
 all dashboard tabs/app windows and reopen to activate the new offline shell.
 
-## Read-only protection and access
+## Optional: delete a game's saves from both sides
 
-- Both dashboard save mounts use Docker `read_only: true`.
+Deletion is **disabled by default**. To enable it with the included Compose
+configuration, add these values to your existing stack's `.env`:
+
+```dotenv
+ALLOW_SAVE_DELETE=true
+DASHBOARD_SAVES_READ_ONLY=false
+```
+
+If you copied an older dashboard service into your own Compose file, also add
+`ALLOW_SAVE_DELETE: "${ALLOW_SAVE_DELETE:-false}"` to its `environment` and change
+**both save-volume** `read_only` settings to
+`${DASHBOARD_SAVES_READ_ONLY:-true}`, as shown in [docker-compose.yml](docker-compose.yml).
+Keep the container-level `read_only: true`: only the two save mounts need write access.
+
+Recreate only the dashboard:
+
+```sh
+docker compose pull dashboard
+docker compose up -d --no-deps dashboard
+```
+
+Its UID/GID must have write and traversal permission on the save directories.
+Back up saves first. Anyone who can access a deletion-enabled dashboard can delete
+saves; protect it with an authenticated reverse proxy and do not expose its port publicly.
+
+Each game has a **Delete saves...** button. It fetches a fresh list of **all**
+matching `.srm` and `.sav` files in that game's configured platform/core/alias
+folders, including subfolders and any surviving copy if its counterpart is missing.
+Other platforms are untouched. Review the exact list, type the game name, and choose
+**Delete all listed saves**. This permanently deletes the files; there is no undo.
+Canceling the confirmation does not change saves.
+
+All removals are submitted concurrently, without requiring you to stop save-sync.
+**This is not an atomic filesystem transaction.** The upstream synchronizer ignores
+already-deleted source files, but a sync operation or game already writing a save
+can recreate copies. Close the game before deleting. If you need a guaranteed
+quiet window, stop save-sync before deletion and start it again afterward.
+Only configured copies are removed; copies in unconfigured cores or on another
+device can also be synced back later.
+
+Before removing anything, the server rechecks the full file list and file identities.
+A changed list, modified file, inaccessible directory, or symlink blocks the operation.
+Missing optional alias directories are allowed. A follow-up scan refreshes the dashboard.
+If a removal fails or files are seen again, the dashboard reports the problem rather
+than claiming success. Separate filesystems cannot guarantee all-or-nothing deletion,
+so a runtime I/O failure can leave some files deleted and others intact; per-file
+failures are shown. There are no automatic retries or rollback writes.
+
+To disable deletion, set `ALLOW_SAVE_DELETE=false` and
+`DASHBOARD_SAVES_READ_ONLY=true`, then recreate the dashboard again.
+
+## Read-only defaults and access
+
+- Both dashboard save mounts use Docker `read_only: true` by default.
 - Its container root filesystem is read-only, runs as UID/GID `1000:1000`, drops
   all capabilities, and uses `no-new-privileges`.
 - Set `DASHBOARD_UID` / `DASHBOARD_GID` in your stack's `.env` to an unprivileged
   identity that can read the saves if needed. Grant directory traversal and file
-  read permission; do not make saves world-writable or remove the read-only mounts.
+  read permission; do not make saves world-writable. Keep mounts read-only unless
+  deliberately enabling the deletion option above.
 - File and directory symlinks are skipped and reported. Files that change while
   being read are reported as unverified. A new scan retries them.
 - Save files over 16 MiB and empty files are reported as errors.
@@ -217,6 +273,8 @@ you see a transient mismatch.
 | `RETROARCH_CORES` | `Mesen,Snes9x,Genesis Plus GX` | Core directories to inspect |
 | `SYSTEMS` | `nes,snes,genesis` | Subset of the three supported platforms |
 | `REFRESH_SECONDS` | `60` | Scan interval (5-86400 seconds) |
+| `ALLOW_SAVE_DELETE` | `false` | Enable confirmed deletion of all configured copies of a game; requires writable save mounts |
+| `DASHBOARD_SAVES_READ_ONLY` | `true` | Compose-only flag controlling both save mounts; set `false` only when enabling deletion |
 | `PORT` | `8080` | Container HTTP port; prefer changing the published host port in Compose |
 | `HOST` | `0.0.0.0` | Container listen address |
 | `MAPPING_FILE` | unset | Optional custom JSON mapping, mounted read-only; invalid files fail startup |
@@ -225,6 +283,11 @@ you see a transient mismatch.
 Unknown systems/cores and incompatible upstream APIs fail startup explicitly.
 `GET /api/status` exposes the snapshot, scan state, and scan errors;
 `POST /api/refresh` waits for a new scan (concurrent requests share one scan).
+When deletion is enabled, `POST /api/delete/preview` takes a platform ID and game
+name and returns a five-minute, single-use confirmation token and exact file list.
+`POST /api/delete` takes that token and the exact game name as `confirm`, revalidates
+the list, and removes all copies concurrently. Both endpoints require same-origin
+JSON requests; client-supplied filesystem paths are never used as deletion targets.
 `GET /healthz` checks service readiness, not whether all games match; inspect
 per-platform issues and game errors in the dashboard for save health.
 
@@ -258,10 +321,10 @@ For a complete Linux test with the real upstream image:
 docker build --pull --target test .
 ```
 
-Tests create synthetic saves in temporary directories, verify file contents
-and timestamps remain unchanged, and cover CRC32, conversion, missing saves,
+Tests create synthetic saves in temporary directories, verify scans leave file contents
+and timestamps unchanged, and cover CRC32, conversion, missing saves,
 duplicate names, unreadable files, refresh behavior, HTTP restrictions, PWA assets,
-and static-only offline caching.
+static-only offline caching, and confirmed deletion using temporary synthetic saves.
 CI also verifies the hardened container can read saves but cannot write them.
 Image publication only runs for this repository's public main branch, never for
 pull requests.

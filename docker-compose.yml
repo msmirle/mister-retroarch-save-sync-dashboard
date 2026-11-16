@@ -19,6 +19,7 @@ services:
       RETROARCH_CORES: "Mesen, Snes9x, Genesis Plus GX"
       SYSTEMS: "nes,snes,genesis"
       REFRESH_SECONDS: "60"
+      ALLOW_SAVE_DELETE: "${ALLOW_SAVE_DELETE:-false}"
       TZ: ${TZ:-UTC}
     ports:
       - "8080:8080"
@@ -31,12 +32,12 @@ services:
       - type: bind
         source: /mnt/external-8tb/retroarch/saves
         target: /retroarch/saves
-        read_only: true
+        read_only: ${DASHBOARD_SAVES_READ_ONLY:-true}
         bind:
           create_host_path: false
       - type: bind
         source: /mnt/external-8tb/mister/saves
         target: /mister/saves
-        read_only: true
+        read_only: ${DASHBOARD_SAVES_READ_ONLY:-true}
         bind:
           create_host_path: false

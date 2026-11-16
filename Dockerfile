@@ -2,7 +2,7 @@ ARG SYNC_IMAGE=ghcr.io/juaniwck/mister-retroarch-save-sync:latest
 FROM ${SYNC_IMAGE} AS dashboard-base
 
 LABEL org.opencontainers.image.source="https://github.com/msmirle/mister-retroarch-save-sync-dashboard" \
-      org.opencontainers.image.description="Read-only MiSTer / RetroArch save comparison dashboard" \
+      org.opencontainers.image.description="MiSTer / RetroArch save comparison dashboard with opt-in paired deletion" \
       org.opencontainers.image.licenses="GPL-3.0-or-later"
 
 WORKDIR /dashboard

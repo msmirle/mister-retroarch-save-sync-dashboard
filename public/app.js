@@ -12,6 +12,8 @@ const ATTENTION = new Set(['different', 'missing', 'error', 'ambiguous']);
 let latest = null;
 let selectedPlatform = 'all';
 let refreshing = false;
+let deletionBusy = false;
+let pendingDeletion = null;
 const $ = (id) => document.getElementById(id);
 
 function element(tag, text, className) {
@@ -23,6 +25,84 @@ function element(tag, text, className) {
 
 function timestamp(value) {
   return value ? new Date(value).toLocaleString() : 'unknown';
+}
+
+function updateDeleteControls() {
+  for (const button of document.querySelectorAll('.delete-save')) {
+    button.disabled = refreshing || deletionBusy || latest?.deleting || !$('connection-error').hidden;
+  }
+}
+
+function deletionNotice(message, error = false) {
+  $('delete-result').textContent = message;
+  $('delete-result').classList.toggle('error', error);
+  $('delete-result').hidden = false;
+  $('delete-result').scrollIntoView({ block: 'nearest' });
+}
+
+async function previewDeletion(platform, game) {
+  deletionBusy = true;
+  updateDeleteControls();
+  try {
+    const response = await fetch('/api/delete/preview', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ platform, game }),
+      cache: 'no-store',
+    });
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || `Server returned HTTP ${response.status}`);
+    pendingDeletion = data;
+    $('delete-title').textContent = `Delete saves: ${data.game}`;
+    $('delete-files').replaceChildren(...data.files.map((file) => element('li',
+      `${file.side === 'retroarch' ? 'RetroArch' : 'MiSTer'}: ${file.path}`)));
+    $('delete-confirm-label').textContent = `Type "${data.game}" to confirm`;
+    $('delete-confirm').value = '';
+    $('delete-submit').disabled = true;
+    $('delete-dialog').showModal();
+  } catch (error) {
+    deletionNotice(`Cannot prepare deletion: ${error.message}`, true);
+  } finally {
+    deletionBusy = false;
+    updateDeleteControls();
+  }
+}
+
+async function confirmDeletion(event) {
+  event.preventDefault();
+  if (!pendingDeletion || $('delete-confirm').value !== pendingDeletion.game) {
+    deletionNotice('Enter the exact game name to confirm deletion.', true);
+    return;
+  }
+  const { token, game } = pendingDeletion;
+  $('delete-dialog').close();
+  deletionBusy = true;
+  updateDeleteControls();
+  deletionNotice('Deleting all listed save copies...');
+  try {
+    const response = await fetch('/api/delete', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ token, confirm: game }),
+      cache: 'no-store',
+    });
+    const data = await response.json();
+    if (data.snapshot) {
+      latest = data;
+      render();
+    }
+    if (!response.ok || data.error) {
+      const failures = (data.failed || []).map((file) => `${file.side}: ${file.path}: ${file.error}`).join('; ');
+      throw new Error([data.error || `Server returned HTTP ${response.status}`, failures].filter(Boolean).join(' '));
+    }
+    deletionNotice(`Deleted all ${data.deleted.length} listed save files for "${game}".`);
+  } catch (error) {
+    deletionNotice(`Deletion could not be fully verified: ${error.message} Refresh before retrying.`, true);
+  } finally {
+    deletionBusy = false;
+    await load();
+    updateDeleteControls();
+  }
 }
 
 function fileList(files) {
@@ -51,6 +131,9 @@ function fileList(files) {
 
 function render() {
   if (!latest?.snapshot) return;
+  $('access-mode').textContent = latest.deletionEnabled ? 'DELETION ENABLED' : 'READ ONLY';
+  $('access-mode').classList.toggle('deletion-enabled', latest.deletionEnabled === true);
+  $('intro').textContent = latest.deletionEnabled ? 'Compare saves, or delete all copies of a game.' : 'Check your saves. Never change them.';
   const snapshot = latest.snapshot;
   const total = Object.values(snapshot.summary).reduce((a, b) => a + b, 0);
   $('scan-info').textContent = `${total} games | Last completed: ${timestamp(snapshot.completedAt)} | `
@@ -115,6 +198,12 @@ function render() {
         cell.append(element('strong', game.name, 'game-name'));
         cell.append(element('span', LABELS[game.status], `badge ${game.status}`));
         cell.append(element('p', game.detail, 'detail'));
+        if (latest.deletionEnabled) {
+          const button = element('button', 'Delete saves...', 'delete-save danger');
+          button.type = 'button';
+          button.addEventListener('click', () => previewDeletion(platform.id, game.name));
+          cell.append(button);
+        }
         row.append(cell, fileList(game.retroarch), fileList(game.mister));
         tbody.append(row);
       }
@@ -124,13 +213,15 @@ function render() {
     }
     results.append(section);
   }
+  updateDeleteControls();
 }
 
 async function load(manual = false) {
-  if (refreshing) return;
+  if (refreshing || deletionBusy) return;
   refreshing = true;
   $('refresh').disabled = true;
   $('refresh').textContent = manual ? 'Scanning...' : 'Refresh now';
+  updateDeleteControls();
   try {
     const response = await fetch(manual ? '/api/refresh' : '/api/status', {
       method: manual ? 'POST' : 'GET',
@@ -139,7 +230,8 @@ async function load(manual = false) {
     const data = await response.json();
     if (data.snapshot) {
       const changed = latest?.snapshot?.completedAt !== data.snapshot.completedAt
-        || latest?.scanning !== data.scanning;
+        || latest?.scanning !== data.scanning || latest?.deletionEnabled !== data.deletionEnabled
+        || latest?.deleting !== data.deleting;
       latest = data;
       if (changed) render();
     }
@@ -153,9 +245,16 @@ async function load(manual = false) {
     refreshing = false;
     $('refresh').disabled = false;
     $('refresh').textContent = 'Refresh now';
+    updateDeleteControls();
   }
 }
 
+$('delete-form').addEventListener('submit', confirmDeletion);
+$('delete-confirm').addEventListener('input', () => {
+  $('delete-submit').disabled = !pendingDeletion || $('delete-confirm').value !== pendingDeletion.game;
+});
+$('delete-cancel').addEventListener('click', () => $('delete-dialog').close());
+$('delete-dialog').addEventListener('close', () => { pendingDeletion = null; });
 $('refresh').addEventListener('click', () => load(true));
 $('search').addEventListener('input', render);
 $('status').addEventListener('change', render);

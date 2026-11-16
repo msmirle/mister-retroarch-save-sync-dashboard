@@ -9,6 +9,7 @@ const { test } = require('node:test');
 const { loadConfig } = require('../src/config');
 const { crc32, scan } = require('../src/scanner');
 const { createDashboard } = require('../src/server');
+const { deletePlanned } = require('../src/deletion');
 
 async function fixture(t, options = {}) {
   const root = await fs.mkdtemp(path.join(os.tmpdir(), 'save-dashboard-'));
@@ -224,6 +225,8 @@ test('invalid configuration and unsafe mapping paths fail explicitly', async (t)
   await assert.rejects(loadConfig({ ...base, SYSTEMS: 'n64' }), /Unsupported dashboard platform/);
   await assert.rejects(loadConfig({ ...base, RETROARCH_CORES: 'Typo' }), /Unknown RetroArch core/);
   await assert.rejects(loadConfig({ ...base, REFRESH_SECONDS: 'NaN' }), /REFRESH_SECONDS/);
+  await assert.rejects(loadConfig({ ...base, ALLOW_SAVE_DELETE: 'yes' }), /ALLOW_SAVE_DELETE/);
+  assert.equal(f.config.allowSaveDelete, false);
   const mapping = path.join(f.root, 'mapping.json');
   await fs.writeFile(mapping, '{"systems":{"nes":{"retroarch":["../outside"],"mister":["NES"]}}}');
   await assert.rejects(loadConfig({ ...base, MAPPING_FILE: mapping, SYSTEMS: 'nes', RETROARCH_CORES: '../outside' }), /Invalid directory mapping/);
@@ -262,6 +265,227 @@ test('HTTP refresh rescans, restricts methods/origins/paths, and never modifies 
   assert.equal((await fetch(`${url}/%2e%2e%2fpackage.json`)).status, 404);
   assert.equal((await fetch(`${url}/api/status`, { method: 'HEAD' })).status, 200);
   await f.unchanged();
+});
+
+function deletionPost(url, route, body, headers = {}) {
+  return fetch(`${url}${route}`, {
+    method: 'POST',
+    headers: { Origin: url, 'Content-Type': 'application/json', ...headers },
+    body: typeof body === 'string' ? body : JSON.stringify(body),
+  });
+}
+
+test('save deletion is disabled by default even if the underlying save directories are writable', async (t) => {
+  const f = await fixture(t);
+  await f.write('retroarch', 'Mesen/Game.srm', Buffer.from('keep'));
+  await f.write('mister', 'NES/Game.sav', Buffer.from('keep'));
+  const dashboard = await createDashboard(f.config, { logger: { error() {} } });
+  const url = await listen(t, dashboard);
+  assert.equal((await (await fetch(`${url}/api/status`)).json()).deletionEnabled, false);
+  for (const route of ['/api/delete/preview', '/api/delete']) {
+    const response = await deletionPost(url, route, { platform: 'nes', game: 'Game' });
+    assert.equal(response.status, 403);
+    assert.match((await response.json()).error, /disabled/);
+  }
+  await f.unchanged();
+});
+
+test('confirmed deletion removes all selected core/alias copies, leaves other platforms alone, and cannot be replayed', async (t) => {
+  const f = await fixture(t, { ALLOW_SAVE_DELETE: 'true', RETROARCH_CORES: 'Mesen,FCEUmm,Snes9x,Genesis Plus GX' });
+  const targets = [
+    await f.write('retroarch', 'Mesen/RPG/Game.srm', Buffer.from('save')),
+    await f.write('retroarch', 'FCEUmm/game.SRM', Buffer.from('save')),
+    await f.write('mister', 'NES/GAME.sav', Buffer.from('save')),
+  ];
+  const untouched = [
+    await f.write('retroarch', 'Snes9x/Game.srm', Buffer.from('other platform')),
+    await f.write('mister', 'SNES/Game.sav', Buffer.from('other platform')),
+    await f.write('retroarch', 'Mesen/Game_bak.srm', Buffer.from('backup')),
+  ];
+  const dashboard = await createDashboard(f.config, { logger: { error() {} } });
+  const url = await listen(t, dashboard);
+  const response = await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'GAME' });
+  assert.equal(response.status, 200);
+  const preview = await response.json();
+  assert.equal(preview.files.length, targets.length);
+  assert.ok(preview.files.every((file) => !('absolutePath' in file)));
+  assert.ok(preview.expiresAt > Date.now());
+  await f.unchanged();
+  assert.equal((await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'wrong' })).status, 409);
+  const body = { token: preview.token, confirm: preview.game, paths: untouched };
+  const removed = await deletionPost(url, '/api/delete', body);
+  assert.equal(removed.status, 200);
+  const result = await removed.json();
+  assert.equal(result.deleted.length, targets.length);
+  assert.deepEqual(result.failed, []);
+  assert.equal(platform(result.snapshot, 'nes').games.length, 0);
+  assert.equal(result.deleting, false);
+  for (const target of targets) await assert.rejects(fs.stat(target), { code: 'ENOENT' });
+  for (const target of untouched) assert.ok((await fs.stat(target)).isFile());
+  assert.equal((await deletionPost(url, '/api/delete', body)).status, 409);
+
+  const aliases = [
+    await f.write('retroarch', 'Genesis Plus GX/Sonic.srm', Buffer.from('save')),
+    await f.write('mister', 'Genesis/Sonic.sav', Buffer.from('save')),
+    await f.write('mister', 'MegaDrive/Sonic.sav', Buffer.from('save')),
+  ];
+  const aliasPreview = await (await deletionPost(url, '/api/delete/preview', { platform: 'genesis', game: 'Sonic' })).json();
+  assert.equal(aliasPreview.files.length, aliases.length);
+  assert.equal((await deletionPost(url, '/api/delete', { token: aliasPreview.token, confirm: 'Sonic' })).status, 200);
+  for (const target of aliases) await assert.rejects(fs.stat(target), { code: 'ENOENT' });
+  await fs.rmdir(path.join(f.config.misterRoot, 'MegaDrive'));
+  const lone = await f.write('mister', 'Genesis/Lone.sav', Buffer.from('remaining copy'));
+  const lonePreview = await (await deletionPost(url, '/api/delete/preview', { platform: 'genesis', game: 'Lone' })).json();
+  assert.equal(lonePreview.files.length, 1);
+  assert.equal((await deletionPost(url, '/api/delete', { token: lonePreview.token, confirm: 'Lone' })).status, 200);
+  await assert.rejects(fs.stat(lone), { code: 'ENOENT' });
+});
+
+test('deletion refuses changed, added, or missing copies before deleting any surviving file', async (t) => {
+  for (const change of ['modified', 'added', 'missing']) {
+    await t.test(change, async (t) => {
+      const f = await fixture(t, { ALLOW_SAVE_DELETE: 'true' });
+      const ra = await f.write('retroarch', 'Mesen/Game.srm', Buffer.from('save'));
+      const mi = await f.write('mister', 'NES/Game.sav', Buffer.from('save'));
+      const dashboard = await createDashboard(f.config, { logger: { error() {} } });
+      const url = await listen(t, dashboard);
+      const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
+      if (change === 'modified') await fs.writeFile(ra, 'new save contents');
+      if (change === 'added') await f.write('retroarch', 'Mesen/subfolder/GAME.srm', Buffer.from('new copy'));
+      if (change === 'missing') await fs.unlink(ra);
+      const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+      assert.equal(response.status, 409);
+      assert.match((await response.json()).error, /changed/);
+      assert.equal(await fs.readFile(mi, 'utf8'), 'save');
+      if (change !== 'missing') assert.ok((await fs.stat(ra)).isFile());
+    });
+  }
+});
+
+test('deletion starts all removals together, rejects overlapping deletes, and reports partial failure with current results', async (t) => {
+  const f = await fixture(t, { ALLOW_SAVE_DELETE: 'true' });
+  const ra = await f.write('retroarch', 'Mesen/Game.srm', Buffer.from('save'));
+  const mi = await f.write('mister', 'NES/Game.sav', Buffer.from('save'));
+  const started = [];
+  let release;
+  const gate = new Promise((resolve) => { release = resolve; });
+  let allStarted;
+  const bothStarted = new Promise((resolve) => { allStarted = resolve; });
+  const dashboard = await createDashboard(f.config, {
+    logger: { error() {} },
+    deleteSaves: (config, plan) => deletePlanned(config, plan, {
+      async unlink(target) {
+        started.push(target);
+        if (started.length === 2) allStarted();
+        await gate;
+        if (target === mi) throw new Error('test removal denied');
+        await fs.unlink(target);
+      },
+    }),
+  });
+  const url = await listen(t, dashboard);
+  const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
+  const deleting = deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+  let timeout;
+  try {
+    await Promise.race([
+      bothStarted,
+      new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Removals were not started concurrently')), 2000); }),
+    ]);
+    assert.equal((await (await fetch(`${url}/api/status`)).json()).deleting, true);
+    assert.equal((await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' })).status, 409);
+    await f.unchanged();
+  } finally {
+    clearTimeout(timeout);
+    release();
+  }
+  const response = await deleting;
+  assert.equal(response.status, 409);
+  const result = await response.json();
+  assert.match(result.error, /could not be deleted/);
+  assert.equal(result.deleted.length, 1);
+  assert.deepEqual(result.failed, [{ side: 'mister', path: 'NES/Game.sav', error: 'test removal denied' }]);
+  assert.equal(platform(result.snapshot, 'nes').games[0].status, 'missing');
+  await assert.rejects(fs.stat(ra), { code: 'ENOENT' });
+  assert.equal(await fs.readFile(mi, 'utf8'), 'save');
+});
+
+test('deletion validates origin, JSON, tokens, and game/platform identifiers without accepting arbitrary paths', async (t) => {
+  const f = await fixture(t, { ALLOW_SAVE_DELETE: 'true' });
+  await f.write('retroarch', 'Mesen/Game.srm', Buffer.from('keep'));
+  await f.write('mister', 'NES/Game.sav', Buffer.from('keep'));
+  const dashboard = await createDashboard(f.config, { logger: { error() {} } });
+  const url = await listen(t, dashboard);
+  const cases = [
+    [{ platform: 'nes', game: 'Game' }, { Origin: 'https://other.invalid' }, 403],
+    [{ platform: 'nes', game: 'Game' }, { Origin: '' }, 403],
+    [{ platform: 'nes', game: 'Game' }, { 'Sec-Fetch-Site': 'cross-site' }, 403],
+    [{ platform: 'nes', game: 'Game' }, { 'Content-Type': 'text/plain' }, 415],
+    ['{broken', {}, 400],
+    [JSON.stringify({ game: 'x'.repeat(9000) }), {}, 413],
+    [null, {}, 400],
+    [{ platform: 'n64', game: 'Game' }, {}, 400],
+    [{ platform: 'nes', game: { path: '../outside.srm' } }, {}, 400],
+    [{ platform: 'nes', game: '../Game' }, {}, 404],
+  ];
+  for (const [body, headers, status] of cases) {
+    const response = await deletionPost(url, '/api/delete/preview', body, headers);
+    assert.equal(response.status, status);
+    assert.ok((await response.json()).error);
+  }
+  assert.equal((await deletionPost(url, '/api/delete', { token: 'unissued', confirm: 'Game' })).status, 409);
+  assert.equal((await fetch(`${url}/api/delete`, { method: 'DELETE' })).status, 405);
+  await f.unchanged();
+});
+
+test('deletion reports recreated saves and follow-up scan failures instead of claiming success', async (t) => {
+  for (const condition of ['recreated', 'scan failed']) {
+    await t.test(condition, async (t) => {
+      const f = await fixture(t, { ALLOW_SAVE_DELETE: 'true' });
+      const ra = await f.write('retroarch', 'Mesen/Game.srm', Buffer.from('save'));
+      await f.write('mister', 'NES/Game.sav', Buffer.from('save'));
+      let removed = false;
+      const dashboard = await createDashboard(f.config, {
+        logger: { error() {} },
+        async scanSaves(config) {
+          if (removed && condition === 'scan failed') throw new Error('test follow-up scan failed');
+          return scan(config);
+        },
+        async deleteSaves(config, plan) {
+          const result = await deletePlanned(config, plan);
+          removed = true;
+          if (condition === 'recreated') await fs.writeFile(ra, 'recreated by sync');
+          return result;
+        },
+      });
+      const url = await listen(t, dashboard);
+      const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
+      const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+      assert.equal(response.status, 409);
+      const result = await response.json();
+      assert.equal(result.deleted.length, 2);
+      assert.match(result.error, condition === 'recreated' ? /recreated/ : /scan failed/);
+    });
+  }
+});
+
+test('deletion refuses symlink/junction parent replacements without touching other copies or link targets', async (t) => {
+  const f = await fixture(t, { ALLOW_SAVE_DELETE: 'true' });
+  const ra = await f.write('retroarch', 'Mesen/slot/Game.srm', Buffer.from('save'));
+  const mi = await f.write('mister', 'NES/Game.sav', Buffer.from('save'));
+  const outsideDirectory = path.join(f.root, 'outside');
+  await fs.mkdir(outsideDirectory);
+  const outside = path.join(outsideDirectory, 'Game.srm');
+  await fs.writeFile(outside, 'outside');
+  const dashboard = await createDashboard(f.config, { logger: { error() {} } });
+  const url = await listen(t, dashboard);
+  const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
+  await fs.rename(path.dirname(ra), path.join(f.config.retroarchRoot, 'Mesen', 'original-slot'));
+  await fs.symlink(outsideDirectory, path.dirname(ra), process.platform === 'win32' ? 'junction' : 'dir');
+  const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+  assert.equal(response.status, 409);
+  assert.equal(await fs.readFile(mi, 'utf8'), 'save');
+  assert.equal(await fs.readFile(outside, 'utf8'), 'outside');
 });
 
 test('PWA metadata, service worker, and correctly sized phone icons are served', async (t) => {
@@ -359,7 +583,7 @@ test('PWA offline fallback is static-only, network-first, and cleans up only its
   assert.equal(await (await request('/app.js')).text(), 'cached /app.js');
   cached.delete('/style.css');
   await assert.rejects(request('/style.css'), disconnected);
-  for (const route of ['/api/status', '/api/refresh', '/healthz', '/unknown', '/sw.js', 'https://other.test/app.js']) {
+  for (const route of ['/api/status', '/api/refresh', '/api/delete/preview', '/api/delete', '/healthz', '/unknown', '/sw.js', 'https://other.test/app.js']) {
     assert.equal(request(route), undefined, `${route} must remain network-only`);
   }
   assert.equal(request('/api/refresh', 'POST'), undefined);

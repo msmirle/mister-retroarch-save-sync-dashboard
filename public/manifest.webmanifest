@@ -2,7 +2,7 @@
   "id": "/",
   "name": "MiSTer / RetroArch Save Dashboard",
   "short_name": "Save Dashboard",
-  "description": "Read-only save comparisons for MiSTer and RetroArch.",
+  "description": "Save comparisons for MiSTer and RetroArch, with optional paired deletion.",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",

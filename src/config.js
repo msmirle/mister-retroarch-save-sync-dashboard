@@ -28,6 +28,9 @@ function safeDirectory(value) {
 }
 
 async function loadConfig(env = process.env) {
+  if (env.ALLOW_SAVE_DELETE !== undefined && !['true', 'false'].includes(env.ALLOW_SAVE_DELETE)) {
+    throw new Error('ALLOW_SAVE_DELETE must be true or false');
+  }
   const moduleRoot = path.resolve(env.SYNC_MODULE_ROOT || '/app/src');
   const { DEFAULT_MAPPING } = require(path.join(moduleRoot, 'mapping.js'));
   const { adapters, discriminators } = require(path.join(moduleRoot, 'converters.js'));
@@ -72,6 +75,7 @@ async function loadConfig(env = process.env) {
     host: env.HOST || '0.0.0.0',
     port: integer(env.PORT, 8080, 0, 65535, 'PORT'),
     refreshSeconds: integer(env.REFRESH_SECONDS, 60, 5, 86400, 'REFRESH_SECONDS'),
+    allowSaveDelete: env.ALLOW_SAVE_DELETE === 'true',
     retroarchRoot: path.resolve(env.RETROARCH_ROOT || '/retroarch', 'saves'),
     misterRoot: path.resolve(env.MISTER_SAVES || '/mister/saves'),
     platforms,

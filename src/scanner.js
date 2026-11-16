@@ -117,7 +117,7 @@ async function collect(root, side, platform, config, issues) {
     try {
       const directory = await resolveLocation(root, location);
       if (!directory) {
-        issues.push({ side, path: location, message: 'Configured save directory is missing' });
+        issues.push({ side, path: location, code: 'MISSING_DIRECTORY', message: 'Configured save directory is missing' });
       } else {
         await walk(directory, location);
       }
@@ -229,4 +229,4 @@ async function scan(config) {
   return result;
 }
 
-module.exports = { crc32, paddedEquivalent, scan };
+module.exports = { crc32, paddedEquivalent, scan, collect };

@@ -19,14 +19,15 @@
   <main>
     <header>
       <div>
-        <p class="eyebrow">MISTER / RETROARCH <span class="readonly">READ ONLY</span></p>
+        <p class="eyebrow">MISTER / RETROARCH <span id="access-mode" class="readonly">READ ONLY</span></p>
         <h1>Save dashboard</h1>
-        <p class="intro">Check your saves. Never change them.</p>
+        <p id="intro" class="intro">Check your saves. Never change them.</p>
       </div>
       <button id="refresh" type="button">Refresh now</button>
     </header>
     <div id="install-error" class="notice error" role="status" hidden></div>
     <div id="connection-error" class="notice error" role="alert" hidden></div>
+    <div id="delete-result" class="notice" role="status" hidden></div>
     <p id="scan-info" class="scan-info" role="status">Loading the first scan...</p>
     <section id="summary" class="summary" aria-label="All-platform game totals"></section>
     <nav id="platforms" aria-label="Platform filter"></nav>
@@ -55,5 +56,19 @@
       This dashboard does not repair or synchronize saves.
     </footer>
   </main>
+  <dialog id="delete-dialog" aria-labelledby="delete-title" aria-describedby="delete-warning">
+    <form id="delete-form">
+      <h2 id="delete-title">Delete game saves</h2>
+      <p id="delete-warning">Permanently delete every file listed below. This cannot be undone.
+        Close the game first. Removals are submitted together, but an active game or sync job can recreate files.</p>
+      <ul id="delete-files"></ul>
+      <label id="delete-confirm-label" for="delete-confirm">Type the game name to confirm</label>
+      <input id="delete-confirm" type="text" autocomplete="off" spellcheck="false" required>
+      <div class="dialog-actions">
+        <button id="delete-cancel" type="button">Cancel</button>
+        <button id="delete-submit" class="danger" type="submit" disabled>Delete all listed saves</button>
+      </div>
+    </form>
+  </dialog>
 </body>
 </html>
