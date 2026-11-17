@@ -71,8 +71,10 @@
       <p id="delete-warning">Permanently delete every file listed below. This cannot be undone.
         Close the game first. Removals are submitted together, but an active game or sync job can recreate files.</p>
       <ul id="delete-files"></ul>
-      <label id="delete-confirm-label" for="delete-confirm">Type the game name to confirm</label>
-      <input id="delete-confirm" type="text" autocomplete="off" spellcheck="false" required>
+      <label class="delete-ack" for="delete-confirm">
+        <input id="delete-confirm" type="checkbox" required>
+        <span id="delete-confirm-label">I understand these saves will be permanently deleted.</span>
+      </label>
       <div class="dialog-actions">
         <button id="delete-cancel" type="button">Cancel</button>
         <button id="delete-submit" class="danger" type="submit" disabled>Delete all listed saves</button>

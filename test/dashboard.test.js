@@ -312,8 +312,10 @@ test('confirmed deletion removes all selected core/alias copies, leaves other pl
   assert.ok(preview.files.every((file) => !('absolutePath' in file)));
   assert.ok(preview.expiresAt > Date.now());
   await f.unchanged();
-  assert.equal((await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'wrong' })).status, 409);
-  const body = { token: preview.token, confirm: preview.game, paths: untouched };
+  assert.equal((await deletionPost(url, '/api/delete',   { token: preview.token })).status, 409);
+    assert.equal((await deletionPost(url, '/api/delete', { token: preview.token, acknowledged: 'true' })).status, 409);
+    assert.equal((await deletionPost(url, '/api/delete', { token: preview.token, confirm: preview.game })).status, 409);
+    const body = { token: preview.token, acknowledged: true, paths: untouched };
   const removed = await deletionPost(url, '/api/delete', body);
   assert.equal(removed.status, 200);
   const result = await removed.json();
@@ -332,13 +334,13 @@ test('confirmed deletion removes all selected core/alias copies, leaves other pl
   ];
   const aliasPreview = await (await deletionPost(url, '/api/delete/preview', { platform: 'genesis', game: 'Sonic' })).json();
   assert.equal(aliasPreview.files.length, aliases.length);
-  assert.equal((await deletionPost(url, '/api/delete', { token: aliasPreview.token, confirm: 'Sonic' })).status, 200);
+  assert.equal((await deletionPost(url, '/api/delete', { token: aliasPreview.token, acknowledged: true })).status, 200);
   for (const target of aliases) await assert.rejects(fs.stat(target), { code: 'ENOENT' });
   await fs.rmdir(path.join(f.config.misterRoot, 'MegaDrive'));
   const lone = await f.write('mister', 'Genesis/Lone.sav', Buffer.from('remaining copy'));
   const lonePreview = await (await deletionPost(url, '/api/delete/preview', { platform: 'genesis', game: 'Lone' })).json();
   assert.equal(lonePreview.files.length, 1);
-  assert.equal((await deletionPost(url, '/api/delete', { token: lonePreview.token, confirm: 'Lone' })).status, 200);
+  assert.equal((await deletionPost(url, '/api/delete', { token: lonePreview.token, acknowledged: true })).status, 200);
   await assert.rejects(fs.stat(lone), { code: 'ENOENT' });
 });
 
@@ -354,7 +356,7 @@ test('deletion refuses changed, added, or missing copies before deleting any sur
       if (change === 'modified') await fs.writeFile(ra, 'new save contents');
       if (change === 'added') await f.write('retroarch', 'Mesen/subfolder/GAME.srm', Buffer.from('new copy'));
       if (change === 'missing') await fs.unlink(ra);
-      const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+      const response = await deletionPost(url, '/api/delete', { token: preview.token, acknowledged: true });
       assert.equal(response.status, 409);
       assert.match((await response.json()).error, /changed/);
       assert.equal(await fs.readFile(mi, 'utf8'), 'save');
@@ -386,7 +388,7 @@ test('deletion starts all removals together, rejects overlapping deletes, and re
   });
   const url = await listen(t, dashboard);
   const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
-  const deleting = deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+  const deleting = deletionPost(url, '/api/delete', { token: preview.token, acknowledged: true });
   let timeout;
   try {
     await Promise.race([
@@ -394,7 +396,7 @@ test('deletion starts all removals together, rejects overlapping deletes, and re
       new Promise((_, reject) => { timeout = setTimeout(() => reject(new Error('Removals were not started concurrently')), 2000); }),
     ]);
     assert.equal((await (await fetch(`${url}/api/status`)).json()).deleting, true);
-    assert.equal((await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' })).status, 409);
+    assert.equal((await deletionPost(url, '/api/delete', { token: preview.token, acknowledged: true })).status, 409);
     await f.unchanged();
   } finally {
     clearTimeout(timeout);
@@ -425,7 +427,7 @@ test('deletion distinguishes metadata-only changes from changed contents with th
       if (changedContents) await fs.writeFile(ra, 'SAVE');
       await fs.utimes(ra, new Date(), timestamp);
       assert.equal((await fs.stat(ra)).mtimeMs, timestamp.getTime());
-      const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+      const response = await deletionPost(url, '/api/delete', { token: preview.token, acknowledged: true });
       assert.equal(response.status, changedContents ? 409 : 200);
       if (changedContents) assert.equal(await fs.readFile(ra, 'utf8'), 'SAVE');
     });
@@ -455,7 +457,7 @@ test('deletion validates origin, JSON, tokens, and game/platform identifiers wit
     assert.equal(response.status, status);
     assert.ok((await response.json()).error);
   }
-  assert.equal((await deletionPost(url, '/api/delete', { token: 'unissued', confirm: 'Game' })).status, 409);
+  assert.equal((await deletionPost(url, '/api/delete', { token: 'unissued', acknowledged: true })).status, 409);
   assert.equal((await fetch(`${url}/api/delete`, { method: 'DELETE' })).status, 405);
   await f.unchanged();
 });
@@ -482,7 +484,7 @@ test('deletion reports recreated saves and follow-up scan failures instead of cl
       });
       const url = await listen(t, dashboard);
       const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
-      const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+      const response = await deletionPost(url, '/api/delete', { token: preview.token,       acknowledged: true });
       assert.equal(response.status, 409);
       const result = await response.json();
       assert.equal(result.deleted.length, 2);
@@ -504,7 +506,7 @@ test('deletion refuses symlink/junction parent replacements without touching oth
   const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
   await fs.rename(path.dirname(ra), path.join(f.config.retroarchRoot, 'Mesen', 'original-slot'));
   await fs.symlink(outsideDirectory, path.dirname(ra), process.platform === 'win32' ? 'junction' : 'dir');
-  const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+  const response = await deletionPost(url, '/api/delete', { token: preview.token,   acknowledged: true });
   assert.equal(response.status, 409);
   assert.equal(await fs.readFile(mi, 'utf8'), 'save');
   assert.equal(await fs.readFile(outside, 'utf8'), 'outside');
@@ -551,7 +553,7 @@ test('automatic sync pause stops before deletion, verifies while off, and preser
       const url = await listen(t, dashboard);
       const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
       assert.equal(sync.state.state, initial, 'opening a confirmation must not stop sync');
-      const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+      const response = await deletionPost(url, '/api/delete', { token: preview.token,       acknowledged: true });
       assert.equal(response.status, 200);
       const data = await response.json();
       assert.equal(data.sync.state, initial);
@@ -574,7 +576,7 @@ test('automatic sync pause fails closed when status or stopping cannot be verifi
       const dashboard = await createDashboard(f.config, { syncClient: sync.client, logger: { error() {} } });
       const url = await listen(t, dashboard);
       const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
-      const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+      const response = await deletionPost(url, '/api/delete', { token: preview.token,       acknowledged: true });
       assert.equal(response.status, 502);
       assert.match((await response.json()).error, /test/);
       await f.unchanged();
@@ -615,7 +617,7 @@ test('automatic sync pause restores a rejected preflight but leaves sync off aft
       const url = await listen(t, dashboard);
       const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
       if (failure === 'changed file') await fs.writeFile(ra, 'changed before confirmation');
-      const response = await deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+      const response = await deletionPost(url, '/api/delete', { token: preview.token,       acknowledged: true });
       assert.equal(response.status, 409);
       const data = await response.json();
       if (failure === 'changed file') {
@@ -672,7 +674,7 @@ test('manual sync toggles cannot race an automatic deletion pause', async (t) =>
   });
   const url = await listen(t, dashboard);
   const preview = await (await deletionPost(url, '/api/delete/preview', { platform: 'nes', game: 'Game' })).json();
-  const removal = deletionPost(url, '/api/delete', { token: preview.token, confirm: 'Game' });
+  const removal = deletionPost(url, '/api/delete', { token: preview.token, acknowledged: true });
   try {
     await started;
     assert.equal(sync.state.state, 'off');

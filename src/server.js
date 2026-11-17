@@ -197,8 +197,8 @@ async function createDashboard(config, {
           json(response, 200, { token, expiresAt, platform: plan.platform, game: plan.name, files: listedFiles(plan.targets) });
         } else {
           const plan = deletionPlans.get(body.token);
-          if (!plan || body.confirm !== plan.name) {
-            throw new DeletionError(409, 'Confirmation expired or does not match. Review a new deletion confirmation.');
+          if (!plan || body.acknowledged !== true) {
+            throw new DeletionError(409, 'Confirmation expired or was not acknowledged. Review a new deletion confirmation.');
           }
           deletionPlans.delete(body.token);
           activeDeletion = (async () => {

@@ -106,8 +106,8 @@ async function previewDeletion(platform, game) {
     $('delete-title').textContent = `Delete saves: ${data.game}`;
     $('delete-files').replaceChildren(...data.files.map((file) => element('li',
       `${file.side === 'retroarch' ? 'RetroArch' : 'MiSTer'}: ${file.path}`)));
-    $('delete-confirm-label').textContent = `Type "${data.game}" to confirm`;
-    $('delete-confirm').value = '';
+    $('delete-confirm-label').textContent = `I understand the listed saves for "${data.game}" will be permanently deleted.`;
+    $('delete-confirm').checked = false;
     $('delete-submit').disabled = true;
     $('delete-warning').textContent = syncState.configured
       ? 'Permanently delete every listed file. This cannot be undone. Close the game first. '
@@ -126,8 +126,8 @@ async function previewDeletion(platform, game) {
 
 async function confirmDeletion(event) {
   event.preventDefault();
-  if (!pendingDeletion || $('delete-confirm').value !== pendingDeletion.game) {
-    deletionNotice('Enter the exact game name to confirm deletion.', true);
+  if (!pendingDeletion || !$('delete-confirm').checked) {
+    deletionNotice('Check the box to confirm deletion.', true);
     return;
   }
   const { token, game } = pendingDeletion;
@@ -143,7 +143,7 @@ async function confirmDeletion(event) {
     const response = await fetch('/api/delete', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, confirm: game }),
+      body: JSON.stringify({ token, acknowledged: true }),
       cache: 'no-store',
     });
     const data = await response.json();
@@ -314,8 +314,8 @@ async function load(manual = false) {
 
 $('delete-form').addEventListener('submit', confirmDeletion);
 $('sync-toggle').addEventListener('click', toggleSync);
-$('delete-confirm').addEventListener('input', () => {
-  $('delete-submit').disabled = !pendingDeletion || $('delete-confirm').value !== pendingDeletion.game;
+$('delete-confirm').addEventListener('change', () => {
+  $('delete-submit').disabled = !pendingDeletion || !$('delete-confirm').checked;
 });
 $('delete-cancel').addEventListener('click', () => $('delete-dialog').close());
 $('delete-dialog').addEventListener('close', () => { pendingDeletion = null; });

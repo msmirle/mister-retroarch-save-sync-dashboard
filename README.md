@@ -144,54 +144,142 @@ This uses **stop/start**, not Docker freeze/unfreeze: resuming a frozen process
 could finish an old write and recreate a deleted save. Other devices can still
 write saves independently; close the game before deleting.
 
-### Setup for your existing `compose.yaml` and `.env`
+### One-time setup (edit your own `compose.yaml` and `.env`)
 
-Keep your current Compose file, including its Traefik labels, networks, and save
-mounts. Download this **additional** file beside it:
+This is done **once**. Afterward, updates are just `docker compose pull` and
+`docker compose up -d` (see [Ongoing updates](#ongoing-updates)).
+
+1. Back up your files:
+
+   ```sh
+   cp -p compose.yaml compose.yaml.backup
+   cp -p .env .env.backup
+   ```
+
+2. Generate a private token and add it to your existing `.env`, keeping
+   everything already there:
+
+   ```sh
+   openssl rand -hex 32
+   ```
+
+   ```dotenv
+   SYNC_CONTROL_TOKEN=PASTE_THE_TOKEN_HERE
+   ```
+
+   Deletion also needs `ALLOW_SAVE_DELETE=true` and `DASHBOARD_SAVES_READ_ONLY=false`
+   (see the next section).
+
+3. In `compose.yaml`, add these two lines to the `dashboard` service's
+   `environment:` list, add `sync-control` to its `networks:`, and add a
+   `depends_on:`. Leave your Traefik labels, save mounts, and `proxy` network as they are:
+
+   ```yaml
+       environment:
+         - SYNC_CONTROL_URL=http://sync-control:8090
+         - SYNC_CONTROL_TOKEN=${SYNC_CONTROL_TOKEN}
+       networks:
+         - default
+         - proxy
+         - sync-control
+       depends_on:
+         - sync-control
+   ```
+
+4. Add the helper as a new service beside `dashboard`, and a private network at
+   the bottom of the file:
+
+   ```yaml
+     sync-control:
+       image: ghcr.io/msmirle/mister-retroarch-save-sync-dashboard:latest
+       container_name: mister-retroarch-save-sync-control
+       command: ["node", "src/sync-control.js"]
+       user: "0:0"
+       environment:
+         - HOST=0.0.0.0
+         - PORT=8090
+         - SYNC_CONTAINER_NAME=mister-retroarch-save-sync
+         - SYNC_CONTROL_TOKEN=${SYNC_CONTROL_TOKEN}
+       read_only: true
+       cap_drop:
+         - ALL
+       security_opt:
+         - no-new-privileges:true
+       volumes:
+         - /var/run/docker.sock:/var/run/docker.sock:ro
+       networks:
+         - sync-control
+       labels:
+         - "traefik.enable=false"
+       healthcheck:
+         test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:8090/healthz').then(r=>process.exit(r.ok?0:1)).catch(e=>{console.error(e.message);process.exit(1)})"]
+         interval: 30s
+         timeout: 5s
+         start_period: 10s
+         retries: 3
+       restart: unless-stopped
+
+   networks:
+     proxy:
+       external: true
+     sync-control:
+       internal: true
+   ```
+
+   The `healthcheck` is required: the image's built-in check probes the dashboard
+   port (8080), so without this override the helper would always show **unhealthy**.
+   Set `SYNC_CONTAINER_NAME` only if you renamed the sync container.
+
+5. Optional but recommended: add a shutdown handler to the existing
+   `save-sync` service so stopping it exits cleanly (code 0). See
+   [Avoiding exit code 137 alerts](#avoiding-exit-code-137-alerts).
+
+6. Validate and start:
+
+   ```sh
+   docker compose config --quiet
+   docker compose pull
+   docker compose up -d
+   ```
+
+   `config --quiet` prints nothing when the file is valid. The page should now
+   show **Sync service: On** with a switch.
+
+Prefer not to edit your Compose file? [compose.sync-control.yaml](compose.sync-control.yaml)
+is an equivalent overlay: download it beside your file and add
+`COMPOSE_FILE=compose.yaml:compose.sync-control.yaml` (Linux separator) to `.env`.
+
+### Ongoing updates
+
+After the one-time setup, update everything with:
 
 ```sh
-curl -fL https://raw.githubusercontent.com/msmirle/mister-retroarch-save-sync-dashboard/main/compose.sync-control.yaml -o compose.sync-control.yaml
+docker compose pull
+docker compose up -d
 ```
 
-Generate a private token:
+### Avoiding exit code 137 alerts
 
-```sh
-openssl rand -hex 32
+The upstream sync daemon has no shutdown handler, so Docker waits 10 seconds and
+then force-kills it. Tools such as Arcane then report
+`mister-retroarch-save-sync exited with code 137` every time the dashboard pauses
+sync. This is harmless: upstream writes each save to a temporary file and then
+renames it, so a stop should not leave a partly written save.
+
+To stop it cleanly without forking upstream, add one `command:` to the existing
+`save-sync` service (same upstream image); it handles `SIGTERM`/`SIGINT` and then
+loads the unchanged daemon:
+
+```yaml
+  save-sync:
+    image: ghcr.io/juaniwck/mister-retroarch-save-sync:latest
+    container_name: mister-retroarch-save-sync
+    command: ["node", "-e", "process.on('SIGTERM',()=>process.exit(0));process.on('SIGINT',()=>process.exit(0));require('./src/daemon.js')"]
 ```
 
-Add these two entries to your existing `.env`, pasting the generated value after
-`SYNC_CONTROL_TOKEN=`:
-
-```dotenv
-COMPOSE_FILE=compose.yaml:compose.sync-control.yaml
-SYNC_CONTROL_TOKEN=
-```
-
-The `COMPOSE_FILE` separator above is for your **Linux Docker server**. If your
-base file is named `docker-compose.yml`, use
-`COMPOSE_FILE=docker-compose.yml:compose.sync-control.yaml` instead.
-Keep your existing deletion settings:
-
-```dotenv
-ALLOW_SAVE_DELETE=true
-DASHBOARD_SAVES_READ_ONLY=false
-```
-
-The extra file wires the helper into the dashboard; no additional edits to your
-existing Compose file are needed for sync control. Your base file still needs
-the deletion environment/mount references described in the next section.
-Then run from the same directory:
-
-```sh
-docker compose config --quiet
-docker compose pull dashboard sync-control
-docker compose up -d sync-control dashboard
-```
-
-These commands add the helper and recreate the dashboard, leaving `save-sync`
-running. Once installed, the dashboard manages that existing container when
-you use the switch or delete a game. Its default name is
-`mister-retroarch-save-sync`; set `SYNC_CONTAINER_NAME` in `.env` only if you renamed it.
+Run `docker compose up -d` once to recreate `save-sync`. Pausing sync then
+stops it immediately with exit code 0. If upstream later changes how
+`src/daemon.js` starts, remove the line to return to the default behavior.
 
 **Permissions:** only the helper receives `/var/run/docker.sock`. It has no
 published port and only joins a private internal network shared with the
@@ -239,7 +327,7 @@ saves; protect it with an authenticated reverse proxy and do not expose its port
 Each game has a **Delete saves...** button. It fetches a fresh list of **all**
 matching `.srm` and `.sav` files in that game's configured platform/core/alias
 folders, including subfolders and any surviving copy if its counterpart is missing.
-Other platforms are untouched. Review the exact list, type the game name, and choose
+Other platforms are untouched. Review the exact list, tick the confirmation checkbox, and choose
 **Delete all listed saves**. This permanently deletes the files; there is no undo.
 Canceling the confirmation does not change saves.
 
@@ -377,7 +465,7 @@ Unknown systems/cores and incompatible upstream APIs fail startup explicitly.
 `POST /api/refresh` waits for a new scan (concurrent requests share one scan).
 When deletion is enabled, `POST /api/delete/preview` takes a platform ID and game
 name and returns a five-minute, single-use confirmation token and exact file list.
-`POST /api/delete` takes that token and the exact game name as `confirm`, revalidates
+`POST /api/delete` takes that token and `acknowledged: true`, revalidates
 the list, and removes all copies concurrently. Both endpoints require same-origin
 JSON requests; client-supplied filesystem paths are never used as deletion targets.
 `GET /api/status` also reports sync service state, control errors, and busy state.
