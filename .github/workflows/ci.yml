@@ -85,7 +85,7 @@ jobs:
           "
 
   publish:
-    if: github.repository == 'msmirle/mister-retroarch-save-sync-dashboard' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && !github.event.repository.private
+    if: github.repository == 'msmirle/mister-retroarch-save-sync-dashboard' && github.ref == 'refs/heads/main' && github.event_name != 'pull_request' && github.event_name != 'schedule' && !github.event.repository.private
     needs: test-and-build
     runs-on: ubuntu-latest
     permissions:
@@ -108,9 +108,11 @@ jobs:
         with:
           context: .
           target: runtime
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64
           pull: true
           push: true
+          provenance: false
+          sbom: false
           build-args: |
             SYNC_IMAGE=${{ needs.test-and-build.outputs.sync-image }}
           tags: |
@@ -125,7 +127,7 @@ jobs:
     needs: publish
     runs-on: ubuntu-latest
     steps:
-      - name: Pull both architectures without credentials
+      - name: Pull image without credentials
         env:
           IMAGE: ghcr.io/msmirle/mister-retroarch-save-sync-dashboard@${{ needs.publish.outputs.digest }}
         shell: bash
@@ -134,4 +136,3 @@ jobs:
           config="$(mktemp -d)"
           echo 'A new GHCR package must be set to Public once in its package settings.'
           docker --config "$config" pull --platform linux/amd64 "$IMAGE"
-          docker --config "$config" pull --platform linux/arm64 "$IMAGE"
